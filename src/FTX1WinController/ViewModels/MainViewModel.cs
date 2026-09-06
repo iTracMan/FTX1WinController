@@ -804,16 +804,27 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private Task ToggleRecordAsync()
     {
         var turningOn = !SdRecording.IsOn;
+
+        // Check before touching the radio's own SD-card recording (LM1) at
+        // all — otherwise a missing/unplugged audio device would leave the
+        // radio thinking it's recording while the local capture never
+        // started, with no way for the next press to reconcile the two.
+        if (turningOn && string.IsNullOrEmpty(SelectedAudioInputDevice))
+        {
+            LastError = "Select an audio input device in Settings before recording.";
+            return Task.CompletedTask;
+        }
+
         SdRecording.ToggleCommand.Execute(null);
         try
         {
             if (turningOn)
             {
                 var path = RecordingLibrary.ReserveNewFilePath(out var id);
-                _currentRecordingId = id;
                 _recordingStartFrequencyHz = FrequencyHz;
                 _recordingStartMode = ModeDisplayName;
                 _audio.StartRecording(path);
+                _currentRecordingId = id;
             }
             else if (_currentRecordingId is { } id)
             {
@@ -833,6 +844,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         {
             LastError = ex.Message;
             _currentRecordingId = null;
+            // Local capture failed to start — revert the CAT toggle too, so
+            // the radio doesn't end up "recording" with nothing backing it
+            // up locally and no way for the next press to tell.
+            if (turningOn) SdRecording.ToggleCommand.Execute(null);
         }
         return Task.CompletedTask;
     }
