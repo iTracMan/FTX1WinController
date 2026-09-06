@@ -14,6 +14,7 @@ public sealed class AppSettings
 {
     public string? Cat1Port { get; set; }
     public string? Cat2Port { get; set; }
+    public string? AudioInputDeviceName { get; set; }
     public List<PresetData> Presets { get; set; } = new();
 
     private static string FilePath => Path.Combine(

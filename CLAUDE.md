@@ -77,32 +77,74 @@ for reference — never edit or commit anything there.
   straight into `RadioController`'s Set/Refresh method pairs — the interface
   they implement was renamed `IBridgeSetting` → `ISettingBinding`
   (`BridgeName` → `Id`) since there's no bridge left to name anything after.
-- **Not yet wired**: Live Monitor / RECORD-to-file / PLAY / the recordings
-  list. These were always Mac-local-USB-audio features with no CAT command
-  behind them at all (unlike SD-card recording via `LM1`/`SdRecording`,
-  which *is* real CAT and fully wired) — they're stubbed to inert
-  no-ops/a clear `LastError` message in `MainViewModel.cs` until the
-  Windows-audio step below happens. `AntennaTuner`'s momentary "start
-  tuning" pulse (`AC` command's P3=2) and the plain Tuner on/off toggle
-  (P3=0/1) are wired per the Yaesu manual's own "on/off/start" field
-  ordering, but not yet independently hardware-confirmed.
-- **Hardware-untested.** The FTX-1's USB-C cable is physically connected to
-  this Windows laptop. `dotnet build`/`dotnet test` (47 tests) both pass, but
-  no real COM port has been opened yet — that verification is the user's to do.
+- **Live Monitor / RECORD-to-file / PLAY are now real, local Windows audio**
+  — `src/FTX1WinController/Audio/`: `LiveAudioService` captures from the
+  FTX-1's USB audio input device (NAudio's MME `WaveInEvent`, chosen over
+  WASAPI for simplicity — this doesn't need WASAPI's lower latency) and
+  either plays it live to this machine's *default* output device (MONITOR,
+  formerly mislabeled "MAC SPEAKER") or writes it to a WAV file (RECORD's
+  local half), independently or both at once, sharing one capture stream.
+  `RecordingLibrary` persists each recording as a `.wav` + sidecar `.json`
+  (frequency/mode/duration) under `%AppData%\FTX1WinController\Recordings`,
+  listed/played back by `RecordingPlayer` for PLAY. The input device is
+  looked up **by name**, not a cached index (indices aren't stable across
+  USB reconnects) — picked once in Settings (`AvailableAudioInputDevices`/
+  `SelectedAudioInputDevice`, persisted in `AppSettings.AudioInputDeviceName`).
+  RECORD still separately drives the real SD-card CAT command
+  (`LM1`/`SdRecording`) exactly as before — that's the radio's own storage,
+  this app has no way to browse it over USB, and it's unrelated to the local
+  WAV files PLAY lists (the two just happen to start/stop together).
+- **Fixed from the first hardware test** (2026-09-06, build 13:29): the
+  stale "BRIDGE (MAC)" label in the connection popup; the Mode grid used a
+  `WrapPanel` (no fixed shape, uneven button sizes on shorter rows) —
+  replaced with a `UniformGrid Rows="4" Columns="5"` plus
+  `ModeButtonViewModel.Blank()` placeholders at the 3 positions the real
+  radio's own mode-button layout leaves empty; and several bespoke
+  `RelayCommand`s (`AntTuneCommand`, `DLevelUpCommand`/`DownCommand`,
+  `RfPowerUpCommand`/`DownCommand`, `ZeroInCommand`, `MessageArmCommand`,
+  `RecordCommand`, `RefreshRecordingsCommand`, `StopPlaybackCommand`,
+  `ToggleAudioMonitorCommand`, `SetSubFrequencyCommand`) were missing from
+  `RaiseCanExecuteChanged()`. That said: WPF's `CommandManager` requery is
+  actually global (every `RelayCommand.CanExecuteChanged` delegates to the
+  same static `CommandManager.RequerySuggested` event), so any one of the
+  already-listed commands firing should have re-evaluated all of them too —
+  this fix is correct hygiene but **probably isn't** why ANT TUNE specifically
+  didn't respond. Still unresolved — see "Open question" below.
+- **Hardware-tested once, several rounds still pending.** The FTX-1's
+  USB-C cable is physically connected to this Windows laptop; `dotnet
+  build`/`dotnet test` (47 tests) both pass. First real hardware test
+  (2026-09-06) found the issues fixed above, plus one open question below.
+
+## Open question: ANT TUNE still not confirmed working
+
+User report: pressing ANT TUNE produces no response on the radio. The
+`RaiseCanExecuteChanged()` fix above was applied but is unlikely to be the
+actual cause (see reasoning there) — no `LastError` was reported either,
+which suggests the command reaches the radio without throwing, but the
+radio doesn't act on it. Two live suspects, not yet distinguished:
+1. **The P3=2 "start tuning" guess is wrong** — `MainViewModel.AntTuneAsync`
+   sends `_radio.SetAntennaTunerAsync('2')`, inferred from the manual's
+   "on/off/start" field ordering for the `AC` command, never independently
+   confirmed on hardware (see `CatCommands.Func.cs`'s `SetAntennaTuner` comment).
+2. **`TunerP1`/`TunerP2` weren't actually discovered from the radio** —
+   `RadioController.RefreshAntennaTunerAsync` reads bare `AC;` and expects
+   the radio to echo back which tuner unit is fitted; if that read fails
+   silently, P1/P2 stay at their `'0'`/`'0'` defaults, which may not be
+   valid identifiers for the real fitted unit, silently mismatching every AC command.
+Next diagnostic step (needs the user): does the plain Tuner ON/OFF toggle
+(right next to ANT TUNE — same `AC` command, P3=0/1) do anything visible
+on the radio? If yes, suspect 1; if no, suspect 2.
 
 ## Planned next steps (in order)
 
 1. ~~Port the CAT protocol layer from the Mac app's Swift source to C#~~ — done.
 2. ~~Wire it into real serial I/O~~ — done, see "Current status" above.
-   **What's left here**: hardware verification. Connect to the real FTX-1
-   (pick CAT-1/CAT-2 COM ports + baud in the connection popup), confirm
-   frequency/mode/PTT/meters and the FUNC-grid controls actually work
-   against the radio, and fix whatever the Mac→Windows port got wrong (the
-   Antenna Tuner P3=2 "start" guess above is the most likely candidate).
-3. Build Live Monitor / RECORD using Windows audio APIs (NAudio or Core Audio),
-   now that the radio's USB audio interface is confirmed visible to Windows.
-   FTX1ControllerWin has no equivalent (its bridge only carries text, not audio),
-   so this is new work, not a port.
+3. ~~Build Live Monitor / RECORD using Windows audio APIs~~ — done, see above.
+4. **Hardware verification, round 2+**: work through remaining issues as
+   the user finds them (ANT TUNE above is the current one), covering every
+   FUNC-grid control, Scan/Split, presets, and the new audio features
+   (device picker, MONITOR passthrough, RECORD-to-file, PLAY) against the
+   real radio.
 
 ## Hardware-confirmed CAT quirks (from the Mac app, NOT reliably in the manual)
 

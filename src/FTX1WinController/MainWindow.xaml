@@ -640,7 +640,7 @@
                                     <DropShadowEffect Color="Black" Direction="270" ShadowDepth="4" BlurRadius="12" Opacity="0.5" />
                                 </Border.Effect>
                                 <StackPanel Margin="14" Width="360">
-                                    <TextBlock Text="BRIDGE (MAC)" Foreground="{StaticResource LabelSecondaryBrush}" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,10" />
+                                    <TextBlock Text="CAT SERIAL CONNECTION" Foreground="{StaticResource LabelSecondaryBrush}" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,10" />
 
                                     <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                                         <TextBlock Text="CAT-1 port:" VerticalAlignment="Center" Foreground="White" Width="70" />
@@ -662,6 +662,14 @@
                                     <TextBlock Text="(CAT-2 optional — leave blank to route PTT over CAT-1)" Foreground="{StaticResource LabelSecondaryBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10" />
 
                                     <Button Content="Refresh Ports" Command="{Binding RefreshPortsCommand}" HorizontalAlignment="Left" />
+
+                                    <TextBlock Text="AUDIO INPUT (RADIO)" Foreground="{StaticResource LabelSecondaryBrush}" FontSize="11" FontWeight="SemiBold" Margin="0,16,0,10" />
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                        <TextBlock Text="Device:" VerticalAlignment="Center" Foreground="White" Width="70" />
+                                        <ComboBox ItemsSource="{Binding AvailableAudioInputDevices}" SelectedItem="{Binding SelectedAudioInputDevice}" Width="180" />
+                                    </StackPanel>
+                                    <TextBlock Text="(the FTX-1's own USB audio interface, used by MONITOR/RECORD)" Foreground="{StaticResource LabelSecondaryBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10" />
+                                    <Button Content="Refresh Audio Devices" Command="{Binding RefreshAudioDevicesCommand}" HorizontalAlignment="Left" />
                                 </StackPanel>
                             </Border>
                         </Popup>
@@ -1133,19 +1141,16 @@
                         </StackPanel>
                     </GroupBox>
 
-                    <!-- MAC SPEAKER — routes the radio's received audio
-                         (already arriving on the Mac via USB-C, same feed
-                         RECORD taps) out to the Mac's own speakers/
-                         soundbar. Purely a Mac-side playback switch —
-                         nothing for this Windows machine to play, same as
-                         PLAY. Bridge protocol confirmed 2026-09-05:
-                         GET MONITOR / SET MONITOR START|STOP. -->
+                    <!-- MONITOR — Live passthrough of the FTX-1's received
+                         audio (its USB audio interface, captured via
+                         LiveAudioService) out to this Windows machine's
+                         default output device. Independent of RECORD. -->
                     <Button Command="{Binding ToggleAudioMonitorCommand}" Width="374" Height="80" Margin="0,10,0,0">
                         <Button.Template>
                             <ControlTemplate TargetType="Button">
                                 <Border x:Name="Cell" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource PanelBorderBrush}" BorderThickness="1" CornerRadius="8">
                                     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
-                                        <TextBlock Text="MAC SPEAKER" Foreground="{StaticResource LabelPrimaryBrush}" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center" />
+                                        <TextBlock Text="MONITOR" Foreground="{StaticResource LabelPrimaryBrush}" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center" />
                                         <TextBlock Text="{Binding AudioMonitorStatusText}" Foreground="{StaticResource AmberBrush}" FontSize="13" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,4,0,0" />
                                     </StackPanel>
                                 </Border>
@@ -1196,17 +1201,36 @@
                         </ItemsControl>
                     </GroupBox>
 
-                    <!-- Mode -->
+                    <!-- Mode — a fixed 4x5 grid matching the real radio's own
+                         mode button layout exactly, not a free-flowing wrap:
+                         row 1 has one trailing blank, row 4 has two. A
+                         UniformGrid also gives every button the same size
+                         regardless of row length, unlike WrapPanel (which
+                         let the last row's buttons size differently). The
+                         blanks are real ModeButtonViewModel.Blank() entries
+                         in ModeButtons (see MainViewModel), not missing
+                         items — UniformGrid has no concept of "skip a cell",
+                         so the placeholder has to be a real (invisible) child. -->
                     <GroupBox Header="Mode" Foreground="White" Margin="0">
                         <ItemsControl ItemsSource="{Binding ModeButtons}" Margin="4">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
-                                    <WrapPanel />
+                                    <UniformGrid Rows="4" Columns="5" />
                                 </ItemsPanelTemplate>
                             </ItemsControl.ItemsPanel>
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Button Content="{Binding DisplayName}" Command="{Binding SelectCommand}" Style="{StaticResource RadioModeButtonStyle}" />
+                                    <Button Content="{Binding DisplayName}" Command="{Binding SelectCommand}">
+                                        <Button.Style>
+                                            <Style TargetType="Button" BasedOn="{StaticResource RadioModeButtonStyle}">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsPlaceholder}" Value="True">
+                                                        <Setter Property="Visibility" Value="Hidden" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Button.Style>
+                                    </Button>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
@@ -1576,7 +1600,7 @@
                                                             <Style TargetType="TextBlock">
                                                                 <Setter Property="Visibility" Value="Collapsed" />
                                                                 <Style.Triggers>
-                                                                    <DataTrigger Binding="{Binding IsPlayingOnMac}" Value="True">
+                                                                    <DataTrigger Binding="{Binding IsPlaying}" Value="True">
                                                                         <Setter Property="Visibility" Value="Visible" />
                                                                     </DataTrigger>
                                                                 </Style.Triggers>

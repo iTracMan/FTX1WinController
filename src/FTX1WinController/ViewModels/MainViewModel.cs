@@ -3,6 +3,7 @@ using System.IO.Ports;
 using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
+using FTX1WinController.Audio;
 using FTX1WinController.Cat;
 using FTX1WinController.Models;
 using FTX1WinController.Settings;
@@ -24,9 +25,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 {
     private readonly RadioController _radio = new();
     private readonly AppSettings _settings = AppSettings.Load();
+    private readonly LiveAudioService _audio = new();
+    private readonly RecordingPlayer _player = new();
     private DispatcherTimer? _pollTimer;
     private int _tickCount;
     private int _funcPage1RotationIndex;
+
+    // Set while a local RECORD capture is in progress, so ToggleRecordAsync
+    // can save frequency/mode as of the moment recording *started* (not
+    // whatever they've drifted to by the time it stops).
+    private string? _currentRecordingId;
+    private long _recordingStartFrequencyHz;
+    private string _recordingStartMode = "";
 
     public MainViewModel()
     {
@@ -51,8 +61,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             }
         };
 
-        ModeButtons = new ObservableCollection<ModeButtonViewModel>(
-            RadioModeInfo.All.Select(m => new ModeButtonViewModel(m, code => _ = SetModeAsync(code))));
+        ModeButtons = new ObservableCollection<ModeButtonViewModel>(BuildModeGrid());
         BandButtons = new ObservableCollection<BandButtonViewModel>(
             BandCodeInfo.All.Select(b => new BandButtonViewModel(b, code => _ = SetBandAsync(code))));
 
@@ -190,6 +199,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         RefreshRecordingsCommand = new RelayCommand(async () => await RefreshRecordingsAsync(), Connected);
         StopPlaybackCommand = new RelayCommand(async () => await StopPlaybackAsync(), Connected);
         ToggleAudioMonitorCommand = new RelayCommand(async () => await ToggleAudioMonitorAsync(), Connected);
+        RefreshAudioDevicesCommand = new RelayCommand(RefreshAudioDevices);
+        RefreshAudioDevices();
+        // Restore the saved device by name only if it's still actually
+        // present — otherwise leave it null rather than silently "select"
+        // a device that isn't there (e.g. the radio unplugged since last run).
+        if (_settings.AudioInputDeviceName is { } savedDevice && AvailableAudioInputDevices.Contains(savedDevice))
+        {
+            SelectedAudioInputDevice = savedDevice;
+        }
 
         for (var ch = 1; ch <= 5; ch++)
         {
@@ -431,14 +449,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public RelayCommand MessageArmCommand { get; private set; } = null!;
 
-    // MARK: - RECORD/PLAY/Live Monitor — the Mac app (and the bridge-based
-    // Windows client before this one) capture/play/route the radio's
-    // received audio via a Mac-local USB audio path that this standalone
-    // app has no equivalent for yet (see CLAUDE.md's "Build Live Monitor /
-    // RECORD using Windows audio APIs" step — deliberately not part of this
-    // CAT-protocol port). RecordCommand still drives the real SD-card CAT
-    // recording (SdRecording/LM1) below; everything else in this region is
-    // a stub until that Windows-audio work happens.
+    // MARK: - RECORD/PLAY/Live Monitor — purely local Windows audio now
+    // that the FTX-1's USB-C cable plugs straight into this laptop (its USB
+    // audio interface shows up as a normal Windows input device). RECORD
+    // drives two independent things at once: the radio's own SD-card CAT
+    // recording (SdRecording/LM1, unrelated, lives on the radio, this app
+    // can't browse it) AND a local WAV capture (Audio/LiveAudioService +
+    // RecordingLibrary) that PLAY lists and plays back. MONITOR (formerly
+    // "MAC SPEAKER") is a live passthrough of the same capture stream to
+    // this machine's default output device, independent of RECORD.
     public RelayCommand RecordCommand { get; private set; } = null!;
     public RelayCommand RefreshRecordingsCommand { get; private set; } = null!;
     public RelayCommand StopPlaybackCommand { get; private set; } = null!;
@@ -448,13 +467,40 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private RecordingEntryViewModel? _selectedRecording;
     public RecordingEntryViewModel? SelectedRecording { get => _selectedRecording; set => SetProperty(ref _selectedRecording, value); }
 
-    private bool _isPlayingOnMac;
-    public bool IsPlayingOnMac { get => _isPlayingOnMac; private set => SetProperty(ref _isPlayingOnMac, value); }
+    private bool _isPlaying;
+    public bool IsPlaying { get => _isPlaying; private set => SetProperty(ref _isPlaying, value); }
 
     private bool _audioMonitorOn;
     public bool AudioMonitorOn { get => _audioMonitorOn; private set { if (SetProperty(ref _audioMonitorOn, value)) OnPropertyChanged(nameof(AudioMonitorStatusText)); } }
     public string AudioMonitorStatusText => AudioMonitorOn ? "ON" : "OFF";
     public RelayCommand ToggleAudioMonitorCommand { get; private set; } = null!;
+
+    // MARK: - Audio input device (the FTX-1's USB audio interface) —
+    // looked up by name at capture time (see LiveAudioService), so a picker
+    // is needed since there's no reliable way to auto-identify which input
+    // device is the radio versus a built-in mic/webcam.
+    public ObservableCollection<string> AvailableAudioInputDevices { get; } = new();
+
+    private string? _selectedAudioInputDevice;
+    public string? SelectedAudioInputDevice
+    {
+        get => _selectedAudioInputDevice;
+        set
+        {
+            if (!SetProperty(ref _selectedAudioInputDevice, value)) return;
+            _audio.SelectedInputDeviceName = value;
+            _settings.AudioInputDeviceName = value;
+            _settings.Save();
+        }
+    }
+
+    public RelayCommand RefreshAudioDevicesCommand { get; private set; } = null!;
+
+    private void RefreshAudioDevices()
+    {
+        AvailableAudioInputDevices.Clear();
+        foreach (var (_, name) in LiveAudioService.GetInputDevices()) AvailableAudioInputDevices.Add(name);
+    }
 
     // MARK: - Scan/Split
     public ChoiceSettingViewModel<int> Scan { get; private set; } = null!;
@@ -749,40 +795,130 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    // MARK: - RECORD/PLAY/Live Monitor stubs — see this region's property
-    // declarations above for why. SdRecording (LM1, real CAT) still works;
-    // everything Mac-audio-only below is inert until the Windows-audio step.
+    // MARK: - RECORD/PLAY/Live Monitor — RECORD drives two independent
+    // things: the radio's own SD-card CAT recording (SdRecording/LM1) and a
+    // local WAV capture via LiveAudioService; PLAY/Recordings only ever
+    // touch the local WAV files (RecordingLibrary), never the radio's SD
+    // card, which this app has no way to browse over USB.
 
-    /// The SD-card CAT recording (LM1, via SdRecording) works standalone;
-    /// the local-audio-file capture the Mac/bridge apps also did on every
-    /// press has no Windows equivalent yet, so this only drives the CAT half.
     private Task ToggleRecordAsync()
     {
+        var turningOn = !SdRecording.IsOn;
         SdRecording.ToggleCommand.Execute(null);
+        try
+        {
+            if (turningOn)
+            {
+                var path = RecordingLibrary.ReserveNewFilePath(out var id);
+                _currentRecordingId = id;
+                _recordingStartFrequencyHz = FrequencyHz;
+                _recordingStartMode = ModeDisplayName;
+                _audio.StartRecording(path);
+            }
+            else if (_currentRecordingId is { } id)
+            {
+                var duration = _audio.StopRecording();
+                RecordingLibrary.SaveMetadata(id, new RecordingMetadata
+                {
+                    TimestampUtc = DateTimeOffset.UtcNow,
+                    FrequencyHz = (int)_recordingStartFrequencyHz,
+                    Mode = _recordingStartMode,
+                    DurationSeconds = duration.TotalSeconds,
+                });
+                _currentRecordingId = null;
+                _ = RefreshRecordingsAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            _currentRecordingId = null;
+        }
         return Task.CompletedTask;
     }
 
     private Task ToggleAudioMonitorAsync()
     {
-        LastError = "Live Monitor needs Windows audio support, not implemented yet.";
+        try
+        {
+            if (_audio.IsMonitoring)
+            {
+                _audio.StopMonitoring();
+                AudioMonitorOn = false;
+            }
+            else
+            {
+                _audio.StartMonitoring();
+                AudioMonitorOn = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+        }
         return Task.CompletedTask;
     }
 
-    private Task RefreshAudioMonitorAsync() => Task.CompletedTask;
+    private Task RefreshAudioMonitorAsync()
+    {
+        AudioMonitorOn = _audio.IsMonitoring;
+        return Task.CompletedTask;
+    }
 
-    private Task RefreshRecordingsAsync() => Task.CompletedTask;
+    private Task RefreshRecordingsAsync()
+    {
+        var selectedId = SelectedRecording?.Id;
+        Recordings.Clear();
+        foreach (var (id, meta) in RecordingLibrary.List())
+        {
+            Recordings.Add(new RecordingEntryViewModel(
+                id, meta.TimestampUtc, meta.FrequencyHz, meta.Mode, meta.DurationSeconds,
+                r => _ = PlayRecordingAsync(r), r => _ = DeleteRecordingAsync(r)));
+        }
+        if (selectedId != null) SelectedRecording = Recordings.FirstOrDefault(r => r.Id == selectedId);
+        return Task.CompletedTask;
+    }
 
     private Task PlayRecordingAsync(RecordingEntryViewModel recording)
     {
-        LastError = "Playback needs Windows audio support, not implemented yet.";
+        SelectedRecording = recording;
+        try
+        {
+            _player.Play(RecordingLibrary.WavPath(recording.Id), () => IsPlaying = false);
+            IsPlaying = true;
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+        }
         return Task.CompletedTask;
     }
 
-    private Task DeleteRecordingAsync(RecordingEntryViewModel recording) => Task.CompletedTask;
+    private Task DeleteRecordingAsync(RecordingEntryViewModel recording)
+    {
+        if (SelectedRecording == recording)
+        {
+            _player.Stop();
+            IsPlaying = false;
+        }
+        RecordingLibrary.Delete(recording.Id);
+        Recordings.Remove(recording);
+        if (SelectedRecording == recording) SelectedRecording = null;
+        return Task.CompletedTask;
+    }
 
-    private Task StopPlaybackAsync() => Task.CompletedTask;
+    private Task StopPlaybackAsync()
+    {
+        _player.Stop();
+        IsPlaying = false;
+        return Task.CompletedTask;
+    }
 
-    private Task RefreshPlaybackStatusAsync() => Task.CompletedTask;
+    private Task RefreshPlaybackStatusAsync()
+    {
+        IsPlaying = _player.IsPlaying;
+        return Task.CompletedTask;
+    }
 
     // MARK: - Scan/Split
 
@@ -937,6 +1073,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         && !string.IsNullOrWhiteSpace(SelectedCat1Port)
         && int.TryParse(Cat1Baud, out _);
 
+    /// Every RelayCommand whose CanExecute depends on ConnectionState needs
+    /// to be listed here explicitly — WPF's CommandManager auto-requery
+    /// (which would otherwise re-evaluate CanExecute on its own) only fires
+    /// on certain routed UI events and isn't reliable enough to depend on
+    /// (same reasoning as NewPresetName's own explicit RaiseCanExecuteChanged
+    /// call). AntTuneCommand was missing from this list — confirmed on
+    /// hardware 2026-09-06 that its button just never became clickable
+    /// after connecting, since nothing ever told it to re-check CanExecute.
     private void RaiseCanExecuteChanged()
     {
         RefreshPortsCommand.RaiseCanExecuteChanged();
@@ -955,6 +1099,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         SubDialUpCommand.RaiseCanExecuteChanged();
         SubDialDownCommand.RaiseCanExecuteChanged();
         SavePresetCommand.RaiseCanExecuteChanged();
+        AntTuneCommand.RaiseCanExecuteChanged();
+        DLevelUpCommand.RaiseCanExecuteChanged();
+        DLevelDownCommand.RaiseCanExecuteChanged();
+        RfPowerUpCommand.RaiseCanExecuteChanged();
+        RfPowerDownCommand.RaiseCanExecuteChanged();
+        ZeroInCommand.RaiseCanExecuteChanged();
+        MessageArmCommand.RaiseCanExecuteChanged();
+        RecordCommand.RaiseCanExecuteChanged();
+        RefreshRecordingsCommand.RaiseCanExecuteChanged();
+        StopPlaybackCommand.RaiseCanExecuteChanged();
+        ToggleAudioMonitorCommand.RaiseCanExecuteChanged();
+        SetSubFrequencyCommand.RaiseCanExecuteChanged();
     }
 
     // MARK: - Connection
@@ -1105,9 +1261,30 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// The real radio's mode buttons form a 4x5 grid with specific
+    /// positions intentionally blank (row 1: 4 modes + 1 blank; rows 2-3:
+    /// 5 modes each; row 4: 3 modes + 2 blanks) — RadioMode's own
+    /// declaration order (Models/RadioMode.cs) already groups the 17 modes
+    /// into exactly these four row sizes, so padding each group to 5 with
+    /// ModeButtonViewModel.Blank() reproduces that layout without
+    /// hardcoding which specific modes are missing from any row.
+    private IEnumerable<ModeButtonViewModel> BuildModeGrid()
+    {
+        var modes = RadioModeInfo.All;
+        var rowSizes = new[] { 4, 5, 5, 3 };
+        var index = 0;
+        foreach (var rowSize in rowSizes)
+        {
+            for (var i = 0; i < rowSize; i++)
+                yield return new ModeButtonViewModel(modes[index++], code => _ = SetModeAsync(code));
+            for (var pad = rowSize; pad < 5; pad++)
+                yield return ModeButtonViewModel.Blank();
+        }
+    }
+
     private void UpdateModeHighlight()
     {
-        foreach (var b in ModeButtons) b.IsActive = b.Mode.CatCode() == _modeCode;
+        foreach (var b in ModeButtons) b.IsActive = b.Mode?.CatCode() == _modeCode;
     }
 
     private void UpdateBandHighlight()
@@ -1285,12 +1462,15 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         StopPolling();
         _ = _radio.DisconnectAsync();
+        _audio.Dispose();
+        _player.Dispose();
     }
 }
 
 public sealed class ModeButtonViewModel : ObservableObject
 {
-    public RadioMode Mode { get; }
+    public RadioMode? Mode { get; }
+    public bool IsPlaceholder => Mode is null;
     public string DisplayName { get; }
     public RelayCommand SelectCommand { get; }
 
@@ -1303,6 +1483,18 @@ public sealed class ModeButtonViewModel : ObservableObject
         DisplayName = mode.DisplayName();
         SelectCommand = new RelayCommand(() => onSelect(mode));
     }
+
+    /// A blank grid cell — the Mode grid's shape is a fixed 4x5 layout with
+    /// specific positions intentionally empty (matching the real radio's
+    /// own mode button layout), not a free-flowing wrap of however many
+    /// modes happen to exist. See MainWindow.xaml's Mode UniformGrid.
+    private ModeButtonViewModel()
+    {
+        DisplayName = "";
+        SelectCommand = new RelayCommand(() => { }, () => false);
+    }
+
+    public static ModeButtonViewModel Blank() => new();
 }
 
 public sealed class BandButtonViewModel : ObservableObject
