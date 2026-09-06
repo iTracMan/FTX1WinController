@@ -4,15 +4,14 @@ using System.Text.Json;
 namespace FTX1WinController.Settings;
 
 /// Persists the handful of connection fields worth remembering between
-/// launches (bridge host, CAT-1/CAT-2 port) so the user doesn't have to
-/// retype them every time — everything else (baud rates, the bridge's own
-/// TCP port) has a stable default and isn't worth the same treatment.
-/// Plain JSON under %AppData%, not the WPF Properties.Settings.settings
-/// designer file, to keep this simple and hand-inspectable rather than
-/// relying on generated code that can't be compiled/verified locally.
+/// launches (CAT-1/CAT-2 COM port) so the user doesn't have to retype them
+/// every time — baud rates have a stable default and aren't worth the same
+/// treatment. Plain JSON under %AppData%, not the WPF
+/// Properties.Settings.settings designer file, to keep this simple and
+/// hand-inspectable rather than relying on generated code that can't be
+/// compiled/verified locally.
 public sealed class AppSettings
 {
-    public string? BridgeHost { get; set; }
     public string? Cat1Port { get; set; }
     public string? Cat2Port { get; set; }
     public List<PresetData> Presets { get; set; } = new();

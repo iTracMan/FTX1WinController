@@ -15,6 +15,14 @@ public interface ISerialTransport
     /// chunk may contain zero, one, or several frames, or a partial one.
     event Action<byte[]>? DataReceived;
 
+    /// Opens the underlying connection. CatConnection.Connect() always
+    /// subscribes DataReceived before calling this, mirroring the Mac app's
+    /// SerialPort.swift requirement that the listener be wired before the
+    /// port is opened, so no bytes can arrive unheard. May throw (e.g.
+    /// System.UnauthorizedAccessException on Windows when the COM port is
+    /// already held open elsewhere).
+    void Open();
+
     void Write(string text);
 
     void Close();

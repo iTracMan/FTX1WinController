@@ -643,13 +643,6 @@
                                     <TextBlock Text="BRIDGE (MAC)" Foreground="{StaticResource LabelSecondaryBrush}" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,10" />
 
                                     <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                        <TextBlock Text="Host:" VerticalAlignment="Center" Foreground="White" Width="70" />
-                                        <TextBox Text="{Binding BridgeHost, UpdateSourceTrigger=PropertyChanged}" Width="140" />
-                                        <TextBlock Text="Port:" VerticalAlignment="Center" Foreground="White" Width="40" Margin="6,0,0,0" />
-                                        <TextBox Text="{Binding BridgePort, UpdateSourceTrigger=PropertyChanged}" Width="50" />
-                                    </StackPanel>
-
-                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                                         <TextBlock Text="CAT-1 port:" VerticalAlignment="Center" Foreground="White" Width="70" />
                                         <ComboBox ItemsSource="{Binding AvailablePorts}" Text="{Binding SelectedCat1Port, UpdateSourceTrigger=PropertyChanged}" Width="180" IsEditable="True" />
                                     </StackPanel>

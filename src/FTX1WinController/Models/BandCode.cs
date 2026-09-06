@@ -2,10 +2,10 @@ namespace FTX1WinController.Models;
 
 /// Ported 1:1 from the Mac app's CATProtocolV2.swift `BandCode` enum (BS
 /// command). BS is Set-only — no Read/Answer exists for it at all, per the
-/// manual and confirmed on hardware — so there is no "GET BAND" bridge
-/// command; the currently-selected band is inferred from the last-known
-/// frequency instead, via FromFrequency below, ported from the same
-/// hardware-confirmed IARU-edge table as RadioControllerV2.currentBandCode
+/// manual and confirmed on hardware — so there is no way to ask the radio
+/// which band it's on; the currently-selected band is inferred from the
+/// last-known frequency instead, via FromFrequency below, ported from the
+/// same hardware-confirmed IARU-edge table as RadioControllerV2.currentBandCode
 /// in the Mac app.
 public enum BandCode
 {

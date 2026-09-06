@@ -1,38 +1,39 @@
 using System.Collections.ObjectModel;
-using FTX1WinController.Bridge;
 
 namespace FTX1WinController.ViewModels;
 
 /// Common shape shared by Int/Toggle/ChoiceSettingViewModel so
 /// MainViewModel's Presets feature can capture/replay any of them
-/// uniformly — "GET &lt;bridgeName&gt;" / "SET &lt;bridgeName&gt; &lt;raw&gt;" with the
-/// raw wire value round-tripped verbatim, no per-setting-type code needed
-/// at the call site.
-public interface IBridgeSetting
+/// uniformly — a raw wire-ish string round-tripped verbatim via the
+/// delegates each was constructed with, no per-setting-type code needed at
+/// the Presets call site. `Id` is just an opaque dictionary key for
+/// PresetData.Values now (there's no bridge to name it after).
+public interface ISettingBinding
 {
     string Label { get; }
-    string BridgeName { get; }
+    string Id { get; }
     Task<string?> CaptureRawAsync();
     Task<bool> ApplyRawAsync(string raw);
 }
 
-/// A single numeric setting synced with the bridge via a "GET <name>" /
-/// "SET <name> <value>" pair, with a shared -/+ stepper pattern (bound to
-/// RepeatButton in XAML for click-and-hold, same as the VFO/Clarifier
-/// steppers from Round 1). Exists so ~15 lines of near-identical property/
-/// command/refresh boilerplate isn't repeated by hand for every one of
-/// FUNC Page 1's dozen-plus sliders — one implementation to get right and
+/// A single numeric setting backed by a RadioController Set/Refresh method
+/// pair (injected as delegates, so this class has no CAT knowledge of its
+/// own), with a shared -/+ stepper pattern (bound to RepeatButton in XAML
+/// for click-and-hold). Exists so ~15 lines of near-identical property/
+/// command/refresh boilerplate isn't repeated by hand for every one of FUNC
+/// Page 1's dozen-plus sliders — one implementation to get right and
 /// review, instead of many near-duplicates.
-public sealed class IntSettingViewModel : ObservableObject, IBridgeSetting
+public sealed class IntSettingViewModel : ObservableObject, ISettingBinding
 {
-    private readonly BridgeClient _bridge;
-    private readonly string _bridgeName;
+    private readonly Func<int> _currentValue;
+    private readonly Func<Task> _refresh;
+    private readonly Func<int, Task> _set;
     private readonly int _min;
     private readonly int _max;
     private readonly Action<string> _onError;
 
     public string Label { get; }
-    public string BridgeName => _bridgeName;
+    public string Id { get; }
     public Func<int, string>? Format { get; set; }
 
     /// Exposed so the FUNC-grid popup slider (FuncSliderPopupCellTemplate)
@@ -63,13 +64,18 @@ public sealed class IntSettingViewModel : ObservableObject, IBridgeSetting
     public RelayCommand UpCommand { get; }
     public RelayCommand DownCommand { get; }
 
-    public IntSettingViewModel(BridgeClient bridge, string label, string bridgeName, int min, int max, int step, Func<bool> canEdit, Action<string> onError)
+    public IntSettingViewModel(
+        string label, string id, int min, int max, int step,
+        Func<int> currentValue, Func<Task> refresh, Func<int, Task> set,
+        Func<bool> canEdit, Action<string> onError)
     {
-        _bridge = bridge;
         Label = label;
-        _bridgeName = bridgeName;
+        Id = id;
         _min = min;
         _max = max;
+        _currentValue = currentValue;
+        _refresh = refresh;
+        _set = set;
         _onError = onError;
         UpCommand = new RelayCommand(async () => await AdjustAsync(step), canEdit);
         DownCommand = new RelayCommand(async () => await AdjustAsync(-step), canEdit);
@@ -79,10 +85,8 @@ public sealed class IntSettingViewModel : ObservableObject, IBridgeSetting
     {
         try
         {
-            var reply = await _bridge.SendAsync($"GET {_bridgeName}");
-            if (reply.StartsWith("ERR")) { _onError(reply); return; }
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 2 && parts[0] == _bridgeName && int.TryParse(parts[1], out var v)) Value = v;
+            await _refresh();
+            Value = _currentValue();
         }
         catch (Exception ex)
         {
@@ -95,9 +99,8 @@ public sealed class IntSettingViewModel : ObservableObject, IBridgeSetting
         var target = Math.Clamp(Value + delta, _min, _max);
         try
         {
-            var reply = await _bridge.SendAsync($"SET {_bridgeName} {target}");
-            if (reply == "OK") Value = target;
-            else _onError(reply);
+            await _set(target);
+            Value = _currentValue();
         }
         catch (Exception ex)
         {
@@ -105,16 +108,15 @@ public sealed class IntSettingViewModel : ObservableObject, IBridgeSetting
         }
     }
 
-    // MARK: - IBridgeSetting (Presets capture/replay — see MainViewModel's
+    // MARK: - ISettingBinding (Presets capture/replay — see MainViewModel's
     // own Presets region)
 
     public async Task<string?> CaptureRawAsync()
     {
         try
         {
-            var reply = await _bridge.SendAsync($"GET {_bridgeName}");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            return parts.Length == 2 && parts[0] == _bridgeName ? parts[1] : null;
+            await _refresh();
+            return _currentValue().ToString();
         }
         catch (Exception ex)
         {
@@ -128,10 +130,9 @@ public sealed class IntSettingViewModel : ObservableObject, IBridgeSetting
         if (!int.TryParse(raw, out var target)) return false;
         try
         {
-            var reply = await _bridge.SendAsync($"SET {_bridgeName} {target}");
-            if (reply == "OK") { Value = target; return true; }
-            _onError(reply);
-            return false;
+            await _set(Math.Clamp(target, _min, _max));
+            Value = _currentValue();
+            return true;
         }
         catch (Exception ex)
         {
@@ -141,26 +142,32 @@ public sealed class IntSettingViewModel : ObservableObject, IBridgeSetting
     }
 }
 
-/// A single on/off setting synced via "GET <name>" / "SET <name> 0|1".
-public sealed class ToggleSettingViewModel : ObservableObject, IBridgeSetting
+/// A single on/off setting backed by a RadioController Set/Refresh method pair.
+public sealed class ToggleSettingViewModel : ObservableObject, ISettingBinding
 {
-    private readonly BridgeClient _bridge;
-    private readonly string _bridgeName;
+    private readonly Func<bool> _currentValue;
+    private readonly Func<Task> _refresh;
+    private readonly Func<bool, Task> _set;
     private readonly Action<string> _onError;
 
     public string Label { get; }
-    public string BridgeName => _bridgeName;
+    public string Id { get; }
 
     private bool _isOn;
     public bool IsOn { get => _isOn; private set => SetProperty(ref _isOn, value); }
 
     public RelayCommand ToggleCommand { get; }
 
-    public ToggleSettingViewModel(BridgeClient bridge, string label, string bridgeName, Func<bool> canEdit, Action<string> onError)
+    public ToggleSettingViewModel(
+        string label, string id,
+        Func<bool> currentValue, Func<Task> refresh, Func<bool, Task> set,
+        Func<bool> canEdit, Action<string> onError)
     {
-        _bridge = bridge;
         Label = label;
-        _bridgeName = bridgeName;
+        Id = id;
+        _currentValue = currentValue;
+        _refresh = refresh;
+        _set = set;
         _onError = onError;
         ToggleCommand = new RelayCommand(async () => await ToggleAsync(), canEdit);
     }
@@ -169,9 +176,8 @@ public sealed class ToggleSettingViewModel : ObservableObject, IBridgeSetting
     {
         try
         {
-            var reply = await _bridge.SendAsync($"GET {_bridgeName}");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 2 && parts[0] == _bridgeName) IsOn = parts[1] == "1";
+            await _refresh();
+            IsOn = _currentValue();
         }
         catch (Exception ex)
         {
@@ -181,12 +187,10 @@ public sealed class ToggleSettingViewModel : ObservableObject, IBridgeSetting
 
     private async Task ToggleAsync()
     {
-        var target = !IsOn;
         try
         {
-            var reply = await _bridge.SendAsync($"SET {_bridgeName} {(target ? 1 : 0)}");
-            if (reply == "OK") IsOn = target;
-            else _onError(reply);
+            await _set(!IsOn);
+            IsOn = _currentValue();
         }
         catch (Exception ex)
         {
@@ -194,15 +198,14 @@ public sealed class ToggleSettingViewModel : ObservableObject, IBridgeSetting
         }
     }
 
-    // MARK: - IBridgeSetting (Presets capture/replay)
+    // MARK: - ISettingBinding (Presets capture/replay)
 
     public async Task<string?> CaptureRawAsync()
     {
         try
         {
-            var reply = await _bridge.SendAsync($"GET {_bridgeName}");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            return parts.Length == 2 && parts[0] == _bridgeName ? parts[1] : null;
+            await _refresh();
+            return _currentValue() ? "1" : "0";
         }
         catch (Exception ex)
         {
@@ -213,13 +216,11 @@ public sealed class ToggleSettingViewModel : ObservableObject, IBridgeSetting
 
     public async Task<bool> ApplyRawAsync(string raw)
     {
-        var target = raw == "1";
         try
         {
-            var reply = await _bridge.SendAsync($"SET {_bridgeName} {(target ? 1 : 0)}");
-            if (reply == "OK") { IsOn = target; return true; }
-            _onError(reply);
-            return false;
+            await _set(raw == "1");
+            IsOn = _currentValue();
+            return true;
         }
         catch (Exception ex)
         {
@@ -248,15 +249,15 @@ public sealed class ChoiceOptionViewModel<T> : ObservableObject
     }
 }
 
-/// A multi-option choice setting (e.g. AGC OFF/AUTO/FAST/MID/SLOW) synced
-/// via "GET <name>" / "SET <name> <rawValue>". `toWire`/`fromWire` convert
-/// between T and the wire representation the bridge expects/returns.
-public sealed class ChoiceSettingViewModel<T> : ObservableObject, IBridgeSetting where T : notnull
+/// A multi-option choice setting (e.g. AGC OFF/AUTO/FAST/MID/SLOW) backed by
+/// a RadioController Set/Refresh method pair. `toWire`/`fromWire` convert
+/// between T and the string Presets stores it as.
+public sealed class ChoiceSettingViewModel<T> : ObservableObject, ISettingBinding where T : notnull
 {
-    private readonly BridgeClient _bridge;
-    private readonly string _bridgeName;
+    private readonly Func<T> _currentValue;
+    private readonly Func<Task> _refresh;
+    private readonly Func<T, Task> _set;
     private readonly Func<T, string> _toWire;
-    public string BridgeName => _bridgeName;
     // A "TryParse"-style (bool ok, T value) pair rather than a nullable T?
     // return: T? on an unconstrained-beyond-notnull generic parameter is a
     // real gotcha for value types (Nullable<int> doesn't implicitly narrow
@@ -266,17 +267,21 @@ public sealed class ChoiceSettingViewModel<T> : ObservableObject, IBridgeSetting
     private readonly Action<string> _onError;
 
     public string Label { get; }
+    public string Id { get; }
     public ObservableCollection<ChoiceOptionViewModel<T>> Options { get; }
 
     public ChoiceSettingViewModel(
-        BridgeClient bridge, string label, string bridgeName,
+        string label, string id,
         IEnumerable<(T value, string displayName)> options,
+        Func<T> currentValue, Func<Task> refresh, Func<T, Task> set,
         Func<T, string> toWire, Func<string, (bool ok, T value)> fromWire,
         Func<bool> canEdit, Action<string> onError)
     {
-        _bridge = bridge;
         Label = label;
-        _bridgeName = bridgeName;
+        Id = id;
+        _currentValue = currentValue;
+        _refresh = refresh;
+        _set = set;
         _toWire = toWire;
         _fromWire = fromWire;
         _onError = onError;
@@ -288,13 +293,8 @@ public sealed class ChoiceSettingViewModel<T> : ObservableObject, IBridgeSetting
     {
         try
         {
-            var reply = await _bridge.SendAsync($"GET {_bridgeName}");
-            var parts = reply.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length >= 2 && parts[0] == _bridgeName)
-            {
-                var (ok, value) = _fromWire(parts[1]);
-                if (ok) UpdateHighlight(value);
-            }
+            await _refresh();
+            UpdateHighlight(_currentValue());
         }
         catch (Exception ex)
         {
@@ -306,9 +306,8 @@ public sealed class ChoiceSettingViewModel<T> : ObservableObject, IBridgeSetting
     {
         try
         {
-            var reply = await _bridge.SendAsync($"SET {_bridgeName} {_toWire(value)}");
-            if (reply == "OK") UpdateHighlight(value);
-            else _onError(reply);
+            await _set(value);
+            UpdateHighlight(_currentValue());
         }
         catch (Exception ex)
         {
@@ -326,15 +325,14 @@ public sealed class ChoiceSettingViewModel<T> : ObservableObject, IBridgeSetting
     /// choice cell (FuncChoiceCellTemplate) shows as its "value" line.
     public string? CurrentDisplayName => Options.FirstOrDefault(o => o.IsActive)?.DisplayName;
 
-    // MARK: - IBridgeSetting (Presets capture/replay)
+    // MARK: - ISettingBinding (Presets capture/replay)
 
     public async Task<string?> CaptureRawAsync()
     {
         try
         {
-            var reply = await _bridge.SendAsync($"GET {_bridgeName}");
-            var parts = reply.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
-            return parts.Length >= 2 && parts[0] == _bridgeName ? parts[1] : null;
+            await _refresh();
+            return _toWire(_currentValue());
         }
         catch (Exception ex)
         {
@@ -349,10 +347,9 @@ public sealed class ChoiceSettingViewModel<T> : ObservableObject, IBridgeSetting
         if (!ok) return false;
         try
         {
-            var reply = await _bridge.SendAsync($"SET {_bridgeName} {_toWire(value)}");
-            if (reply == "OK") { UpdateHighlight(value); return true; }
-            _onError(reply);
-            return false;
+            await _set(value);
+            UpdateHighlight(_currentValue());
+            return true;
         }
         catch (Exception ex)
         {

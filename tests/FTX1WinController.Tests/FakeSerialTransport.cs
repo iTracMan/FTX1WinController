@@ -11,6 +11,13 @@ public sealed class FakeSerialTransport : ISerialTransport
     public event Action<byte[]>? DataReceived;
     public List<string> WrittenCommands { get; } = new();
     public bool ThrowOnWrite { get; set; }
+    public bool ThrowOnOpen { get; set; }
+
+    public void Open()
+    {
+        if (ThrowOnOpen) throw new UnauthorizedAccessException("simulated port busy");
+        IsOpen = true;
+    }
 
     public void Write(string text)
     {

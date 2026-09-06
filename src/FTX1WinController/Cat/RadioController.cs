@@ -63,6 +63,13 @@ public sealed partial class RadioController : ObservableObject
             LastError = ex.Message;
             Cat1.Disconnect();
             Cat2.Disconnect();
+            // Re-thrown (unlike the Mac app's own connect(), which just
+            // records the failure into connectionState/lastError for its
+            // reactive UI) so a caller can distinguish specific failures —
+            // e.g. UnauthorizedAccessException for an already-open COM
+            // port — for its own dedicated messaging, on top of the state
+            // recorded above for anything just observing this object.
+            throw;
         }
     }
 

@@ -6,9 +6,9 @@ namespace FTX1WinController.Settings;
 /// each get their own field since they aren't wrapped in an Int/Toggle/
 /// ChoiceSettingViewModel; everything that IS (FUNC Page 1/2 sliders,
 /// toggles, AGC/ANT, Scan/Split) lives in `Values`, keyed by that setting's
-/// own bridge command name (e.g. "SCOPEPEAK", "ATT", "AGC") so recall can
-/// replay a plain "SET <key> <value>" per entry without needing a
-/// hand-maintained field per setting.
+/// own opaque id (e.g. "SCOPEPEAK", "ATT", "AGC" — see ISettingBinding.Id)
+/// so recall can replay each entry through its ApplyRawAsync without
+/// needing a hand-maintained field per setting.
 public sealed class PresetData
 {
     public string Name { get; set; } = "";

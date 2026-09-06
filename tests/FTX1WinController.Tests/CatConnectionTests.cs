@@ -88,6 +88,20 @@ public class CatConnectionTests
     }
 
     [Fact]
+    public void Connect_SubscribesBeforeOpening_AndPropagatesOpenFailures()
+    {
+        var transport = new FakeSerialTransport { ThrowOnOpen = true };
+        var connection = new CatConnection();
+
+        // Mirrors WindowsSerialTransport surfacing an already-open COM port
+        // as UnauthorizedAccessException — Connect() must let that escape
+        // rather than swallow it, so a caller (RadioController.ConnectAsync)
+        // can show a dedicated "port busy" message.
+        Assert.Throws<UnauthorizedAccessException>(() => connection.Connect(transport));
+        Assert.False(connection.IsConnected);
+    }
+
+    [Fact]
     public async Task SendAsync_WhenNotConnected_FailsImmediately()
     {
         var connection = new CatConnection();

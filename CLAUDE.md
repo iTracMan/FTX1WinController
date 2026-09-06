@@ -56,25 +56,49 @@ for reference — never edit or commit anything there.
   A new xUnit project (`tests/FTX1WinController.Tests`, 46 tests) covers the
   quirks and the connection's queueing/timeout/framing behavior with a fake
   transport. `dotnet build` and `dotnet test` both pass clean.
-- Not yet done: a `System.IO.Ports.SerialPort`-backed `ISerialTransport`,
-  COM-port discovery/selection UI, and rewiring `MainViewModel` off
-  `BridgeClient` onto `RadioController` — see next steps.
-- The FTX-1's USB-C cable is physically connected to this Windows laptop
-  (moved from the Mac). Its USB audio interface already shows up in Windows'
-  audio device list. Actual serial I/O against the real radio has not been
-  tested yet.
+- **Wired into real serial I/O.** `WindowsSerialTransport` implements
+  `ISerialTransport` over `System.IO.Ports.SerialPort` (8N1, no flow control,
+  matching the Mac's confirmed settings; subscribes to the port's own
+  `DataReceived` in its constructor, before `Open()` is ever called, so no
+  byte can arrive before something's listening). `MainViewModel.cs` no
+  longer references `BridgeClient` at all — it's deleted (`Bridge/` folder
+  removed), along with `BridgeHost`/`BridgePort` (AppSettings and the
+  connection popup's Host/Port fields). `SelectedCat1Port`/`SelectedCat2Port`
+  now hold real Windows COM port names (e.g. `COM3`), populated by
+  `RefreshPortsCommand` from `SerialPort.GetPortNames()` — no more asking a
+  bridge for its port list. `ConnectAsync` builds `WindowsSerialTransport`
+  instances and hands them to `RadioController.ConnectAsync`; a busy COM
+  port surfaces as `UnauthorizedAccessException`, caught specifically to
+  show the same "port busy" dialog the bridge version had (reworded — a Mac
+  app can no longer hold a Windows COM port in this architecture).
+  `IntSettingViewModel`/`ToggleSettingViewModel`/`ChoiceSettingViewModel<T>`
+  (FUNC-grid sliders/toggles/choices) were re-pointed from generic
+  `"GET <name>"/"SET <name> <value>"` bridge strings to typed delegates
+  straight into `RadioController`'s Set/Refresh method pairs — the interface
+  they implement was renamed `IBridgeSetting` → `ISettingBinding`
+  (`BridgeName` → `Id`) since there's no bridge left to name anything after.
+- **Not yet wired**: Live Monitor / RECORD-to-file / PLAY / the recordings
+  list. These were always Mac-local-USB-audio features with no CAT command
+  behind them at all (unlike SD-card recording via `LM1`/`SdRecording`,
+  which *is* real CAT and fully wired) — they're stubbed to inert
+  no-ops/a clear `LastError` message in `MainViewModel.cs` until the
+  Windows-audio step below happens. `AntennaTuner`'s momentary "start
+  tuning" pulse (`AC` command's P3=2) and the plain Tuner on/off toggle
+  (P3=0/1) are wired per the Yaesu manual's own "on/off/start" field
+  ordering, but not yet independently hardware-confirmed.
+- **Hardware-untested.** The FTX-1's USB-C cable is physically connected to
+  this Windows laptop. `dotnet build`/`dotnet test` (47 tests) both pass, but
+  no real COM port has been opened yet — that verification is the user's to do.
 
 ## Planned next steps (in order)
 
-1. ~~Port the CAT protocol layer from the Mac app's Swift source to C#~~ — done,
-   see "Current status" above.
-2. **Wire it into real serial I/O**: write a `WindowsSerialTransport`
-   (`ISerialTransport` over `System.IO.Ports.SerialPort`, replicating the Mac's
-   confirmed 8N1/no-flow-control settings and exclusive-open handling), add
-   COM-port discovery/selection UI, and rewire `MainViewModel.cs` off
-   `BridgeClient` onto `RadioController`. This step needs the physical radio
-   and hands-on testing by the user — Claude Code cannot see or interact with
-   the hardware directly.
+1. ~~Port the CAT protocol layer from the Mac app's Swift source to C#~~ — done.
+2. ~~Wire it into real serial I/O~~ — done, see "Current status" above.
+   **What's left here**: hardware verification. Connect to the real FTX-1
+   (pick CAT-1/CAT-2 COM ports + baud in the connection popup), confirm
+   frequency/mode/PTT/meters and the FUNC-grid controls actually work
+   against the radio, and fix whatever the Mac→Windows port got wrong (the
+   Antenna Tuner P3=2 "start" guess above is the most likely candidate).
 3. Build Live Monitor / RECORD using Windows audio APIs (NAudio or Core Audio),
    now that the radio's USB audio interface is confirmed visible to Windows.
    FTX1ControllerWin has no equivalent (its bridge only carries text, not audio),

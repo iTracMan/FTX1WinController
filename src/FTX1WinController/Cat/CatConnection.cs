@@ -49,6 +49,24 @@ public sealed class CatConnection
             _transport = transport;
             _transport.DataReceived += OnDataReceived;
         }
+        try
+        {
+            // Subscribed above before opening, so no byte the port delivers
+            // can arrive before something is listening for it.
+            transport.Open();
+        }
+        catch
+        {
+            lock (_gate)
+            {
+                if (ReferenceEquals(_transport, transport))
+                {
+                    _transport.DataReceived -= OnDataReceived;
+                    _transport = null;
+                }
+            }
+            throw;
+        }
     }
 
     public void Disconnect()

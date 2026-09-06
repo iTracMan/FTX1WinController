@@ -1,26 +1,28 @@
 using System.Collections.ObjectModel;
+using System.IO.Ports;
 using System.Threading;
 using System.Windows;
 using System.Windows.Threading;
-using FTX1WinController.Bridge;
+using FTX1WinController.Cat;
 using FTX1WinController.Models;
 using FTX1WinController.Settings;
 
 namespace FTX1WinController.ViewModels;
 
-public enum ConnectionState { Disconnected, Connecting, Connected, Failed }
-
 /// MAIN AF/RF/SQL knob's current target — mirrors VFODialPanelView's own
 /// `SubDialTarget` in the Mac app.
 public enum SubDialTarget { Af, Rf, Sql }
 
-/// The "RadioController" equivalent for this app — except every property
-/// here is filled in by asking the Mac-side bridge, never by talking CAT
-/// directly. Poll cadence (250ms meters, every 8th tick = 2s for
-/// freq/mode/PTT) mirrors RadioController.startPolling() in the Mac app.
+/// Drives the UI by talking to a RadioController, which talks CAT directly
+/// over two real COM ports (System.IO.Ports.SerialPort, via
+/// WindowsSerialTransport) — no bridge, no network. Poll cadence (250ms
+/// meters, every 8th tick = 2s for freq/mode/PTT) mirrors
+/// RadioController.startPolling() in the Mac app; this app's own
+/// DispatcherTimer drives it since RadioController deliberately doesn't run
+/// its own poll loop (see RadioController.cs).
 public sealed class MainViewModel : ObservableObject, IDisposable
 {
-    private readonly BridgeClient _bridge = new();
+    private readonly RadioController _radio = new();
     private readonly AppSettings _settings = AppSettings.Load();
     private DispatcherTimer? _pollTimer;
     private int _tickCount;
@@ -28,9 +30,26 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public MainViewModel()
     {
-        _bridgeHost = _settings.BridgeHost ?? "";
         _selectedCat1Port = _settings.Cat1Port;
         _selectedCat2Port = _settings.Cat2Port;
+
+        // Mirror the two pieces of RadioController state this ViewModel
+        // doesn't otherwise poll for on every change (LastError/
+        // ConnectionState are set from inside RadioController's own
+        // methods, including ones this ViewModel doesn't call directly,
+        // like CatConnection's internal timeout handling).
+        _radio.PropertyChanged += (_, e) =>
+        {
+            switch (e.PropertyName)
+            {
+                case nameof(RadioController.LastError):
+                    LastError = _radio.LastError;
+                    break;
+                case nameof(RadioController.ConnectionState):
+                    ConnectionState = _radio.ConnectionState;
+                    break;
+            }
+        };
 
         ModeButtons = new ObservableCollection<ModeButtonViewModel>(
             RadioModeInfo.All.Select(m => new ModeButtonViewModel(m, code => _ = SetModeAsync(code))));
@@ -59,46 +78,79 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         // FUNC Page 1 — see SettingViewModels.cs for the reusable Int/
         // Toggle/Choice helper types this leans on instead of ~15 lines of
         // near-identical property/command/refresh boilerplate per control.
+        // Each is wired directly to a RadioController Set/Refresh method
+        // pair — no protocol string in sight, unlike the bridge-based version.
         bool Connected() => ConnectionState == ConnectionState.Connected;
         void OnError(string msg) => LastError = msg;
 
-        DPeak = new IntSettingViewModel(_bridge, "D-Peak", "SCOPEPEAK", 0, 4, 1, Connected, OnError) { Format = v => $"LV{v + 1}" };
-        DColor = new IntSettingViewModel(_bridge, "D-Color", "SCOPECOLOR", 0, 10, 1, Connected, OnError) { Format = v => $"COLOR-{v + 1}" };
-        DContrast = new IntSettingViewModel(_bridge, "D-Contrast", "DISPLAYCONTRAST", 0, 20, 1, Connected, OnError);
-        DimmerBrightness = new IntSettingViewModel(_bridge, "Dimmer (TFT)", "DISPLAYBRIGHTNESS", 0, 20, 1, Connected, OnError);
-        DimmerLed = new IntSettingViewModel(_bridge, "Dimmer (LED)", "DISPLAYLED", 0, 20, 1, Connected, OnError);
-        ProcLevel = new IntSettingViewModel(_bridge, "Proc Level", "PROCLEVEL", 0, 100, 1, Connected, OnError);
-        NoiseBlanker = new IntSettingViewModel(_bridge, "NB", "NB", 0, 10, 1, Connected, OnError) { Format = v => v == 0 ? "OFF" : v.ToString() };
-        NoiseReduction = new IntSettingViewModel(_bridge, "DNR", "NR", 0, 10, 1, Connected, OnError) { Format = v => v == 0 ? "OFF" : v.ToString() };
-        MicGain = new IntSettingViewModel(_bridge, "Mic Gain", "MICGAIN", 0, 100, 1, Connected, OnError);
-        AmcLevel = new IntSettingViewModel(_bridge, "AMC Level", "AMCLEVEL", 1, 100, 1, Connected, OnError);
-        VoxGain = new IntSettingViewModel(_bridge, "VOX Gain", "VOXGAIN", 0, 100, 1, Connected, OnError);
-        VoxDelay = new IntSettingViewModel(_bridge, "VOX Delay", "VOXDELAY", 0, 33, 1, Connected, OnError) { Format = v => $"{VoxDelayMs(v)}ms" };
+        DPeak = new IntSettingViewModel("D-Peak", "SCOPEPEAK", 0, 4, 1,
+            () => _radio.ScopePeakLevel, _radio.RefreshScopePeakAsync, _radio.SetScopePeakAsync, Connected, OnError) { Format = v => $"LV{v + 1}" };
+        DColor = new IntSettingViewModel("D-Color", "SCOPECOLOR", 0, 10, 1,
+            () => _radio.ScopeColorIndex, _radio.RefreshScopeColorAsync, _radio.SetScopeColorAsync, Connected, OnError) { Format = v => $"COLOR-{v + 1}" };
+        // Display (DA) has one combined Set for contrast/brightness/LED —
+        // each of these three sends the other two's last-known value
+        // alongside its own change, same read-then-merge the bridge used
+        // to do server-side.
+        DContrast = new IntSettingViewModel("D-Contrast", "DISPLAYCONTRAST", 0, 20, 1,
+            () => _radio.DisplayContrast, _radio.RefreshDisplayAsync,
+            v => _radio.SetDisplayAsync(v, _radio.DisplayBrightness, _radio.DisplayLedBrightness), Connected, OnError);
+        DimmerBrightness = new IntSettingViewModel("Dimmer (TFT)", "DISPLAYBRIGHTNESS", 0, 20, 1,
+            () => _radio.DisplayBrightness, _radio.RefreshDisplayAsync,
+            v => _radio.SetDisplayAsync(_radio.DisplayContrast, v, _radio.DisplayLedBrightness), Connected, OnError);
+        DimmerLed = new IntSettingViewModel("Dimmer (LED)", "DISPLAYLED", 0, 20, 1,
+            () => _radio.DisplayLedBrightness, _radio.RefreshDisplayAsync,
+            v => _radio.SetDisplayAsync(_radio.DisplayContrast, _radio.DisplayBrightness, v), Connected, OnError);
+        ProcLevel = new IntSettingViewModel("Proc Level", "PROCLEVEL", 0, 100, 1,
+            () => _radio.ProcLevel, _radio.RefreshProcLevelAsync, _radio.SetProcLevelAsync, Connected, OnError);
+        NoiseBlanker = new IntSettingViewModel("NB", "NB", 0, 10, 1,
+            () => _radio.NoiseBlankerLevel, _radio.RefreshNoiseBlankerAsync, _radio.SetNoiseBlankerAsync, Connected, OnError) { Format = v => v == 0 ? "OFF" : v.ToString() };
+        NoiseReduction = new IntSettingViewModel("DNR", "NR", 0, 10, 1,
+            () => _radio.NoiseReductionLevel, _radio.RefreshNoiseReductionAsync, _radio.SetNoiseReductionAsync, Connected, OnError) { Format = v => v == 0 ? "OFF" : v.ToString() };
+        MicGain = new IntSettingViewModel("Mic Gain", "MICGAIN", 0, 100, 1,
+            () => _radio.MicGain, _radio.RefreshMicGainAsync, _radio.SetMicGainAsync, Connected, OnError);
+        AmcLevel = new IntSettingViewModel("AMC Level", "AMCLEVEL", 1, 100, 1,
+            () => _radio.AmcLevel, _radio.RefreshAmcLevelAsync, _radio.SetAmcLevelAsync, Connected, OnError);
+        VoxGain = new IntSettingViewModel("VOX Gain", "VOXGAIN", 0, 100, 1,
+            () => _radio.VoxGain, _radio.RefreshVoxGainAsync, _radio.SetVoxGainAsync, Connected, OnError);
+        VoxDelay = new IntSettingViewModel("VOX Delay", "VOXDELAY", 0, 33, 1,
+            () => _radio.VoxDelayIndex, _radio.RefreshVoxDelayAsync, _radio.SetVoxDelayAsync, Connected, OnError) { Format = v => $"{VoxDelayMs(v)}ms" };
 
-        DMarker = new ToggleSettingViewModel(_bridge, "D-Marker", "SCOPEMARKER", Connected, OnError);
-        Attenuator = new ToggleSettingViewModel(_bridge, "ATT", "ATT", Connected, OnError);
-        AutoNotch = new ToggleSettingViewModel(_bridge, "DNF", "DNF", Connected, OnError);
-        MicEq = new ToggleSettingViewModel(_bridge, "Mic EQ", "MICEQ", () => Connected() && MicEqAvailable, OnError);
-        Tuner = new ToggleSettingViewModel(_bridge, "Tuner", "TUNER", Connected, OnError);
-        Vox = new ToggleSettingViewModel(_bridge, "VOX", "VOX", Connected, OnError);
-        // No Split tracking yet (that's a later round) — TXW is left
-        // ungated for now; on real hardware it only actually takes effect
-        // once Split is on (confirmed 2026-09-03: SET TXW 1 returns OK but
-        // reads back OFF again with Split off), matching the Mac app's own
-        // UI, which already disables this button unless splitOn.
-        Txw = new ToggleSettingViewModel(_bridge, "TXW", "TXW", Connected, OnError);
+        DMarker = new ToggleSettingViewModel("D-Marker", "SCOPEMARKER",
+            () => _radio.ScopeMarkerOn, _radio.RefreshScopeMarkerAsync, _radio.SetScopeMarkerAsync, Connected, OnError);
+        Attenuator = new ToggleSettingViewModel("ATT", "ATT",
+            () => _radio.RfAttenuatorOn, _radio.RefreshRfAttenuatorAsync, _radio.SetRfAttenuatorAsync, Connected, OnError);
+        AutoNotch = new ToggleSettingViewModel("DNF", "DNF",
+            () => _radio.AutoNotchOn, _radio.RefreshAutoNotchAsync, _radio.SetAutoNotchAsync, Connected, OnError);
+        MicEq = new ToggleSettingViewModel("Mic EQ", "MICEQ",
+            () => _radio.MicEqOn, _radio.RefreshMicEqAsync, _radio.SetMicEqAsync, () => Connected() && MicEqAvailable, OnError);
+        // Antenna Tuner's on/off (P3) and the momentary "start tuning"
+        // action (AntTuneCommand, below) both drive the same AC command's
+        // P3 field — P1/P2 (which tuner is fitted) are discovered from the
+        // radio's own Answer and never guessed, see RadioController.Func.cs.
+        Tuner = new ToggleSettingViewModel("Tuner", "TUNER",
+            () => _radio.TunerOn, _radio.RefreshAntennaTunerAsync, on => _radio.SetAntennaTunerAsync(on ? '1' : '0'), Connected, OnError);
+        Vox = new ToggleSettingViewModel("VOX", "VOX",
+            () => _radio.VoxOn, _radio.RefreshVoxAsync, _radio.SetVoxAsync, Connected, OnError);
+        // TXW only actually takes effect while Split is on (confirmed on
+        // the Mac app's hardware testing — see CatCommands.Func.cs's TXW
+        // comment); mirrors the Mac app's own FUNC panel, which disables
+        // this button unless splitOn.
+        Txw = new ToggleSettingViewModel("TXW", "TXW",
+            () => _radio.TxwOn, _radio.RefreshTxwAsync, _radio.SetTxwAsync, () => Connected() && _radio.SplitOn, OnError);
 
         Agc = new ChoiceSettingViewModel<int>(
-            _bridge, "AGC", "AGC",
+            "AGC", "AGC",
             // Mirrors the radio's own on-screen button order (OFF/AUTO/
-            // FAST/MID/SLOW), not AGCMode's raw declaration order.
+            // FAST/MID/SLOW), not AgcMode's raw declaration order.
             new[] { (0, "OFF"), (4, "AUTO"), (1, "FAST"), (2, "MID"), (3, "SLOW") },
+            () => (int)_radio.AgcMode, _radio.RefreshAgcAsync, v => _radio.SetAgcAsync((AgcMode)v),
             v => v.ToString(), s => (int.TryParse(s, out var v), v),
             Connected, OnError);
 
         Ant = new ChoiceSettingViewModel<int>(
-            _bridge, "ANT", "HFANT",
+            "ANT", "HFANT",
             new[] { (0, "ANT1"), (1, "ANT2") },
+            () => _radio.HfAntSelect, _radio.RefreshHfAntSelectAsync, _radio.SetHfAntSelectAsync,
             v => v.ToString(), s => (int.TryParse(s, out var v), v),
             () => Connected() && IsHfBand, OnError);
 
@@ -111,19 +163,26 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         RebuildPreampOptions();
 
         // FUNC Page 2 (CW) — same reusable Int/Toggle helpers as Page 1.
-        MoniLevel = new IntSettingViewModel(_bridge, "Moni Level", "MONITORLEVEL", 0, 100, 1, Connected, OnError);
-        CwSpeed = new IntSettingViewModel(_bridge, "CW Speed", "KEYSPEED", 4, 60, 1, Connected, OnError) { Format = v => $"{v}wpm" };
-        CwPitch = new IntSettingViewModel(_bridge, "CW Pitch", "KEYPITCH", 300, 1050, 10, Connected, OnError) { Format = v => $"{v}Hz" };
+        MoniLevel = new IntSettingViewModel("Moni Level", "MONITORLEVEL", 0, 100, 1,
+            () => _radio.MoniLevel, _radio.RefreshMonitorLevelAsync, _radio.SetMonitorLevelAsync, Connected, OnError);
+        CwSpeed = new IntSettingViewModel("CW Speed", "KEYSPEED", 4, 60, 1,
+            () => _radio.KeySpeedWpm, _radio.RefreshKeySpeedAsync, _radio.SetKeySpeedAsync, Connected, OnError) { Format = v => $"{v}wpm" };
+        CwPitch = new IntSettingViewModel("CW Pitch", "KEYPITCH", 300, 1050, 10,
+            () => _radio.KeyPitchHz, _radio.RefreshKeyPitchAsync, _radio.SetKeyPitchAsync, Connected, OnError) { Format = v => $"{v}Hz" };
         // Same 0-33 index -> ms table as VOX Delay (see VoxDelayMs) — the
         // manual documents both with identical irregular-then-100ms-step
-        // values, confirmed 1:1 against the Mac app's own
-        // CATProtocolV3.cwBreakInDelayTable.
-        CwBreakInDelay = new IntSettingViewModel(_bridge, "BK-Delay", "CWBREAKINDELAY", 0, 33, 1, Connected, OnError) { Format = v => $"{VoxDelayMs(v)}ms" };
+        // values, confirmed 1:1 against CatCommands.CwBreakInDelayMs.
+        CwBreakInDelay = new IntSettingViewModel("BK-Delay", "CWBREAKINDELAY", 0, 33, 1,
+            () => _radio.CwBreakInDelayIndex, _radio.RefreshCwBreakInDelayAsync, _radio.SetCwBreakInDelayAsync, Connected, OnError) { Format = v => $"{VoxDelayMs(v)}ms" };
 
-        Keyer = new ToggleSettingViewModel(_bridge, "Keyer", "KEYER", () => Connected() && KeyerAvailable, OnError);
-        BreakIn = new ToggleSettingViewModel(_bridge, "BK-IN", "BREAKIN", Connected, OnError);
-        CwSpot = new ToggleSettingViewModel(_bridge, "CW Spot", "CWSPOT", Connected, OnError);
-        SdRecording = new ToggleSettingViewModel(_bridge, "Record", "SDRECORDING", Connected, OnError);
+        Keyer = new ToggleSettingViewModel("Keyer", "KEYER",
+            () => _radio.KeyerOn, _radio.RefreshKeyerAsync, _radio.SetKeyerAsync, () => Connected() && KeyerAvailable, OnError);
+        BreakIn = new ToggleSettingViewModel("BK-IN", "BREAKIN",
+            () => _radio.BreakInOn, _radio.RefreshBreakInAsync, _radio.SetBreakInAsync, Connected, OnError);
+        CwSpot = new ToggleSettingViewModel("CW Spot", "CWSPOT",
+            () => _radio.CwSpotOn, _radio.RefreshCwSpotAsync, _radio.SetCwSpotAsync, Connected, OnError);
+        SdRecording = new ToggleSettingViewModel("Record", "SDRECORDING",
+            () => _radio.SdRecordingOn, _radio.RefreshSdRecordingAsync, _radio.SetSdRecordingAsync, Connected, OnError);
 
         ZeroInCommand = new RelayCommand(async () => await ZeroInAsync(), Connected);
         MessageArmCommand = new RelayCommand(ArmMessageRecording, Connected);
@@ -139,45 +198,49 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
         MessageCell = new ChoiceCellViewModel("MESSAGE", MessageChannelOptions);
 
-        // Scan/Split — ported from OperatingPanelView.swift.
+        // Scan/Split
         Scan = new ChoiceSettingViewModel<int>(
-            _bridge, "Scan", "SCAN",
+            "Scan", "SCAN",
             new[] { (0, "Stop"), (1, "Up"), (2, "Down") },
+            () => (int)_radio.ScanState, _radio.RefreshScanAsync, v => _radio.SetScanAsync((CatCommands.ScanState)v),
             v => v.ToString(), s => (int.TryParse(s, out var v), v),
             Connected, OnError);
-        Split = new ToggleSettingViewModel(_bridge, "Split", "SPLIT", Connected, OnError);
+        Split = new ToggleSettingViewModel("Split", "SPLIT",
+            () => _radio.SplitOn, _radio.RefreshSplitAsync, _radio.SetSplitAsync, Connected, OnError);
+        // Deliberately excluded from Presets (see AllPresetSettings) —
+        // hardware-confirmed that this switches the radio's currently-
+        // active VFO, not just which side transmits during split.
         TxSide = new ChoiceSettingViewModel<bool>(
-            _bridge, "TX", "TXSIDE",
+            "TX", "TXSIDE",
             new[] { (true, "MAIN"), (false, "SUB") },
+            () => _radio.TxSideIsMain, _radio.RefreshTxSideAsync, _radio.SetTxSideAsync,
             v => v ? "0" : "1", s => (s == "0" || s == "1", s == "0"),
             Connected, OnError);
         RepeaterShift = new ChoiceSettingViewModel<string>(
-            _bridge, "Shift", "REPEATERSHIFT",
+            "Shift", "REPEATERSHIFT",
             new[] { ("0", "SIMPLEX"), ("1", "+"), ("2", "−"), ("3", "ARS") },
+            () => _radio.RepeaterShift.CatCode().ToString(), _radio.RefreshRepeaterShiftAsync,
+            v => RepeaterShiftInfo.FromCatCode(v[0]) is { } shift ? _radio.SetRepeaterShiftAsync(shift) : Task.CompletedTask,
             v => v, s => (true, s),
             Connected, OnError);
         ToneType = new ChoiceSettingViewModel<string>(
-            _bridge, "Type", "TONETYPE",
+            "Type", "TONETYPE",
             new[] { ("0", "OFF"), ("1", "ENC"), ("2", "ENC+DEC"), ("3", "DCS") },
+            () => _radio.ToneType.CatCode().ToString(), _radio.RefreshToneTypeAsync,
+            v => Models.ToneTypeInfo.FromCatCode(v[0]) is { } tone ? _radio.SetToneTypeAsync(tone) : Task.CompletedTask,
             v => v, s => (true, s),
             Connected, OnError);
-        CtcssIndex = new IntSettingViewModel(_bridge, "CTCSS Tone", "CTCSSINDEX", 0, ToneTables.CtcssHz.Length - 1, 1, Connected, OnError) { Format = ToneTables.CtcssLabel };
-        DcsIndex = new IntSettingViewModel(_bridge, "DCS Code", "DCSINDEX", 0, ToneTables.DcsCodes.Length - 1, 1, Connected, OnError) { Format = ToneTables.DcsLabel };
+        CtcssIndex = new IntSettingViewModel("CTCSS Tone", "CTCSSINDEX", 0, ToneTables.CtcssHz.Length - 1, 1,
+            () => _radio.CtcssIndex, _radio.RefreshToneNumberAsync, _radio.SetCtcssIndexAsync, Connected, OnError) { Format = ToneTables.CtcssLabel };
+        DcsIndex = new IntSettingViewModel("DCS Code", "DCSINDEX", 0, ToneTables.DcsCodes.Length - 1, 1,
+            () => _radio.DcsIndex, _radio.RefreshToneNumberAsync, _radio.SetDcsIndexAsync, Connected, OnError) { Format = ToneTables.DcsLabel };
         SetSubFrequencyCommand = new RelayCommand(async () => await SetSubFrequencyAsync(), Connected);
 
         SavePresetCommand = new RelayCommand(async () => await SavePresetAsync(), () => Connected() && !string.IsNullOrWhiteSpace(NewPresetName));
         foreach (var data in _settings.Presets) Presets.Add(MakePresetViewModel(data));
     }
 
-    // MARK: - Bridge connection fields (Mac host/port)
-
-    private string _bridgeHost;
-    public string BridgeHost { get => _bridgeHost; set => SetProperty(ref _bridgeHost, value); }
-
-    private string _bridgePort = "5150";
-    public string BridgePort { get => _bridgePort; set => SetProperty(ref _bridgePort, value); }
-
-    // MARK: - CAT-1/CAT-2 port fields (Mac-side serial device paths, from PORTS)
+    // MARK: - CAT-1/CAT-2 port fields (real Windows COM port names, e.g. "COM3")
 
     public ObservableCollection<string> AvailablePorts { get; } = new();
 
@@ -274,8 +337,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public int RfOrSquelchValue => ModeShowsSquelchNotRF ? Squelch : RfGain;
 
     /// Label to match — the rail's own name needs to say which one it's
-    /// currently showing (confirmed 2026-09-04: a static "RFG" label
-    /// stayed wrong once SQL-mode kicked in).
+    /// currently showing.
     public string RfOrSquelchLabel => ModeShowsSquelchNotRF ? "SQL" : "RFG";
 
     private SubDialTarget _subDialTarget = SubDialTarget.Af;
@@ -291,8 +353,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         SubDialTarget.Sql => Squelch,
     };
 
-    /// Same hardware-confirmed mode-family rule as the Mac app's own
-    /// `modeShowsSquelchNotRF`: FM/FM-N/C4FM-DN/D-FM/D-FM-N/C4FM-VW show
+    /// Same hardware-confirmed mode-family rule as RadioController's own
+    /// `ModeShowsSquelchNotRf`: FM/FM-N/C4FM-DN/D-FM/D-FM-N/C4FM-VW show
     /// SQL, every other mode shows RF.
     private static readonly HashSet<char> SquelchModeCodes = new() { '4', 'B', 'H', 'A', 'F', 'I' };
     public bool ModeShowsSquelchNotRF => SquelchModeCodes.Contains(_modeCode);
@@ -342,17 +404,16 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public ToggleSettingViewModel SdRecording { get; private set; } = null!;
     public RelayCommand ZeroInCommand { get; private set; } = null!;
 
-    /// Keyer (KR) only stays on in CW-L/CW-U — ported 1:1 from
-    /// RadioController.swift's own `keyerAvailable` (mode codes "7"=CW-L,
-    /// "3"=CW-U).
+    /// Keyer (KR) only stays on in CW-L/CW-U — mode codes "7"=CW-L, "3"=CW-U.
     private static readonly HashSet<char> KeyerModeCodes = new() { '7', '3' };
     public bool KeyerAvailable => KeyerModeCodes.Contains(_modeCode);
 
-    // MARK: - MESSAGE MEMORY (LM/PB) — see FTX1Bridge's RadioBridge.swift
-    // for the hard-won LM/PB semantics this mirrors: a channel tap plays
-    // it back (PB); only MEM arms recording (LM0), with a local 5s
-    // countdown mirroring the radio's own arm window (no CAT-readable
-    // "armed" flag exists to poll instead, same caveat as the Mac app).
+    // MARK: - MESSAGE MEMORY (LM/PB) — a channel tap plays it back (PB);
+    // only MEM arms recording (LM0), with a local 5s countdown mirroring
+    // the radio's own arm window (no CAT-readable "armed" flag exists to
+    // poll instead). Both LM and PB are real CAT commands, fully wired to
+    // RadioController — unlike RECORD/PLAY below, which needs Windows audio
+    // support this app doesn't have yet.
 
     public ObservableCollection<ChoiceOptionViewModel<int>> MessageChannelOptions { get; } = new();
 
@@ -370,16 +431,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     public RelayCommand MessageArmCommand { get; private set; } = null!;
 
-    // MARK: - RECORD/PLAY — the Mac app's own RECORD button already does
-    // two things at once on every press: toggles the radio's own SD-card
-    // recording (LM1/SDRECORDING) AND starts/stops a Mac-local capture of
-    // the same received audio via the FTX-1's USB audio interface
-    // (FuncPage2PanelView.sdRecordButton). `RecordCommand` mirrors that
-    // exact dual action — `SdRecording` alone (below) only covers the
-    // radio's own SD card half. PLAY has no Windows-side audio at all:
-    // selecting a recording and pressing Play plays it back on the Mac's
-    // own speakers (SET PLAY <id>), since only the Mac has a USB audio
-    // path to the radio — there is nothing for this laptop to stream.
+    // MARK: - RECORD/PLAY/Live Monitor — the Mac app (and the bridge-based
+    // Windows client before this one) capture/play/route the radio's
+    // received audio via a Mac-local USB audio path that this standalone
+    // app has no equivalent for yet (see CLAUDE.md's "Build Live Monitor /
+    // RECORD using Windows audio APIs" step — deliberately not part of this
+    // CAT-protocol port). RecordCommand still drives the real SD-card CAT
+    // recording (SdRecording/LM1) below; everything else in this region is
+    // a stub until that Windows-audio work happens.
     public RelayCommand RecordCommand { get; private set; } = null!;
     public RelayCommand RefreshRecordingsCommand { get; private set; } = null!;
     public RelayCommand StopPlaybackCommand { get; private set; } = null!;
@@ -392,21 +451,12 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private bool _isPlayingOnMac;
     public bool IsPlayingOnMac { get => _isPlayingOnMac; private set => SetProperty(ref _isPlayingOnMac, value); }
 
-    // MARK: - Live audio monitor — routes the radio's received audio
-    // (already arriving on the Mac over its USB-C connection to the radio,
-    // same feed RECORD taps) out to the Mac's own speakers/soundbar.
-    // Purely a Mac-side playback switch — nothing for this Windows machine
-    // to play, same reasoning as PLAY above. Independent of RECORD/PLAY in
-    // all combinations (Mac-side confirmed 2026-09-05). Bridge protocol is
-    // GET/SET MONITOR START/STOP rather than the generic ToggleSettingViewModel
-    // shape (SET <NAME> 0|1), so it's a bespoke pair like ToggleRecordAsync
-    // rather than a plain ToggleSettingViewModel instance.
     private bool _audioMonitorOn;
     public bool AudioMonitorOn { get => _audioMonitorOn; private set { if (SetProperty(ref _audioMonitorOn, value)) OnPropertyChanged(nameof(AudioMonitorStatusText)); } }
     public string AudioMonitorStatusText => AudioMonitorOn ? "ON" : "OFF";
     public RelayCommand ToggleAudioMonitorCommand { get; private set; } = null!;
 
-    // MARK: - Scan/Split — ported from OperatingPanelView.swift.
+    // MARK: - Scan/Split
     public ChoiceSettingViewModel<int> Scan { get; private set; } = null!;
     public ToggleSettingViewModel Split { get; private set; } = null!;
     public ChoiceSettingViewModel<bool> TxSide { get; private set; } = null!;
@@ -425,20 +475,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public RelayCommand SetSubFrequencyCommand { get; private set; } = null!;
 
     // MARK: - Presets — an app-level save/recall convenience, NOT the
-    // FTX-1's own [PRESET] button (that's FT8-specific — see the CAT
-    // Operation Reference Manual p.51-52 — and unrelated to this). Captures
-    // every IBridgeSetting-implementing control plus the handful of
-    // bespoke ones (frequency/mode/D-Level/RF Power/Preamp) into a named
-    // PresetData, persisted via AppSettings the same way connection fields
-    // already are.
+    // FTX-1's own [PRESET] button (that's FT8-specific, unrelated to this).
     public ObservableCollection<PresetViewModel> Presets { get; } = new();
 
     private string _newPresetName = "";
     // Explicit RaiseCanExecuteChanged rather than relying on WPF's
-    // CommandManager auto-requery — that auto-requery is unreliable for
-    // input inside an AllowsTransparency Popup (confirmed 2026-09-04: the
-    // Save button stayed disabled for every preset after the first, since
-    // typing into the popover's TextBox never triggered a requery).
+    // CommandManager auto-requery — unreliable for input inside an
+    // AllowsTransparency Popup.
     public string NewPresetName
     {
         get => _newPresetName;
@@ -454,15 +497,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public RelayCommand RfPowerDownCommand { get; private set; } = null!;
 
     /// Per the Advance Manual: Mic EQ is only activated in LSB/USB/AM/
-    /// AM-N/FM/FM-N — ported 1:1 from RadioControllerV3.swift's own
-    /// `micEQAvailable`.
+    /// AM-N/FM/FM-N.
     private static readonly HashSet<char> MicEqModeCodes = new() { '1', '2', '5', 'D', '4', 'B' };
     public bool MicEqAvailable => MicEqModeCodes.Contains(_modeCode);
 
-    /// Same HF/50 threshold as RadioControllerV2.swift's own `preampBand`
-    /// (<60MHz = HF/50), used to gate HF ANT SELECT the same way the Mac
-    /// app does — not independently confirmed on hardware for this exact
-    /// boundary, same caveat as the Mac app's own comment.
+    /// Same HF/50 threshold as RadioController.Dsp.cs's own
+    /// `PreampBandForFrequency` (<60MHz = HF/50), used to gate HF ANT
+    /// SELECT the same way — not independently confirmed on hardware for
+    /// this exact boundary.
     private bool IsHfBand => FrequencyHz < 60_000_000;
 
     private string CurrentPreampBandCode => FrequencyHz switch
@@ -490,10 +532,9 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     }
 
     /// IPO's option set/meaning depends on which band the radio is
-    /// currently on (HF/50: IPO/AMP1/AMP2; VHF/UHF: OFF/ON) — ported 1:1
-    /// from CATProtocolV2.swift's `PreampBand`. Rebuilt only when the band
-    /// actually changes (tracked via `_lastPreampBandCode`), not on every
-    /// frequency poll tick, to avoid needlessly recreating the buttons.
+    /// currently on (HF/50: IPO/AMP1/AMP2; VHF/UHF: OFF/ON). Rebuilt only
+    /// when the band actually changes (tracked via `_lastPreampBandCode`),
+    /// not on every frequency poll tick.
     private void RebuildPreampOptions()
     {
         PreampOptions.Clear();
@@ -518,45 +559,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task RefreshPreampAsync()
     {
-        try
-        {
-            var band = CurrentPreampBandCode;
-            var reply = await _bridge.SendAsync($"GET PREAMP {band}");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 3 && parts[0] == "PREAMP" && int.TryParse(parts[2], out var v))
-            {
-                PreampValue = v;
-                foreach (var o in PreampOptions) o.IsActive = o.Value == v;
-                UpdateIpoCurrentDisplayName();
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.RefreshPreampAsync();
+        PreampValue = _radio.PreampValue;
+        foreach (var o in PreampOptions) o.IsActive = o.Value == PreampValue;
+        UpdateIpoCurrentDisplayName();
     }
 
     private async Task SetPreampAsync(int value)
     {
-        try
-        {
-            var band = CurrentPreampBandCode;
-            var reply = await _bridge.SendAsync($"SET PREAMP {band} {value}");
-            if (reply == "OK")
-            {
-                PreampValue = value;
-                foreach (var o in PreampOptions) o.IsActive = o.Value == value;
-                UpdateIpoCurrentDisplayName();
-            }
-            else
-            {
-                LastError = reply;
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.SetPreampAsync(value);
+        PreampValue = _radio.PreampValue;
+        foreach (var o in PreampOptions) o.IsActive = o.Value == PreampValue;
+        UpdateIpoCurrentDisplayName();
     }
 
     private double _dLevel;
@@ -564,18 +578,8 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task RefreshDLevelAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET SCOPELEVEL");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            // Invariant culture — the wire protocol always uses "." as the
-            // decimal separator regardless of the Windows machine's locale.
-            if (parts.Length == 2 && parts[0] == "SCOPELEVEL" && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v)) DLevel = v;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.RefreshScopeLevelAsync();
+        DLevel = _radio.ScopeLevelDb;
     }
 
     /// Direct "set to this value" for the popup slider (FUNC-grid D-Level
@@ -586,41 +590,20 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private async Task AdjustDLevelAsync(double delta)
     {
         var target = Math.Clamp(DLevel + delta, -30, 30);
-        try
-        {
-            var reply = await _bridge.SendAsync($"SET SCOPELEVEL {target.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
-            if (reply == "OK") DLevel = target;
-            else LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.SetScopeLevelAsync(target);
+        DLevel = _radio.ScopeLevelDb;
     }
 
-    private int _powerAmpP1 = 2;
     private int _rfPowerWatts;
     public int RfPowerWatts { get => _rfPowerWatts; private set { if (SetProperty(ref _rfPowerWatts, value)) OnPropertyChanged(nameof(RfPowerMax)); } }
     public int RfPowerMin => 5;
-    public int RfPowerMax => _powerAmpP1 == 2 ? 100 : 10;
+    public int RfPowerMax => _radio.PowerAmpId == 2 ? 100 : 10;
 
     private async Task RefreshRfPowerAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET POWER");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 3 && parts[0] == "POWER" && int.TryParse(parts[1], out var amp) && int.TryParse(parts[2], out var watts))
-            {
-                _powerAmpP1 = amp;
-                OnPropertyChanged(nameof(RfPowerMax));
-                RfPowerWatts = watts;
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.RefreshRfPowerAsync();
+        OnPropertyChanged(nameof(RfPowerMax));
+        RfPowerWatts = _radio.PowerWatts;
     }
 
     /// Direct "set to this value" for the popup slider (FUNC-grid RF Power
@@ -630,32 +613,17 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private async Task AdjustRfPowerAsync(int delta)
     {
         var target = Math.Clamp(RfPowerWatts + delta, RfPowerMin, RfPowerMax);
-        try
-        {
-            var reply = await _bridge.SendAsync($"SET POWER {target}");
-            if (reply == "OK") RfPowerWatts = target;
-            else LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.SetRfPowerAsync(target);
+        OnPropertyChanged(nameof(RfPowerMax));
+        RfPowerWatts = _radio.PowerWatts;
     }
 
-    private async Task AntTuneAsync()
-    {
-        try
-        {
-            var reply = await _bridge.SendAsync("SET TUNER START");
-            if (reply != "OK") LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
-    }
+    /// Sends the "start tuning" pulse (AC's P3=2, alongside 0=off/1=on for
+    /// the Tuner toggle above) — per the Yaesu manual's own "on/off/start"
+    /// wording order for this field; not yet independently hardware-confirmed.
+    private async Task AntTuneAsync() => await _radio.SetAntennaTunerAsync('2');
 
-    /// Ported 1:1 from CATProtocolV3.swift's own `voxDelayMs(forIndex:)`.
+    /// Same table as CatCommands.VoxDelayMs/CwBreakInDelayMs.
     private static int VoxDelayMs(int index) => index switch
     {
         0 => 30,
@@ -671,7 +639,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     /// same way the Mac app's own refreshFuncTXCore is split from
     /// refreshDisplay/refreshScopeQuickItems, so the poll-loop rotation
     /// (see OnPollTickAsync) has two evenly-sized slots instead of one
-    /// 24-read group landing on a single tick.
+    /// large group landing on a single tick.
     private async Task RefreshFuncPage1DisplayGroupAsync()
     {
         await RefreshDLevelAsync();
@@ -706,9 +674,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     /// Full pass across every FUNC Page 1 control — used right after
     /// connecting so the UI reflects actual radio state immediately rather
-    /// than waiting out the poll loop's rotation. The rotation itself (see
-    /// OnPollTickAsync) refreshes one group at a time instead of calling
-    /// this on every slow tick.
+    /// than waiting out the poll loop's rotation.
     private async Task RefreshFuncPage1Async()
     {
         await RefreshFuncPage1DisplayGroupAsync();
@@ -735,41 +701,20 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task RefreshMessageMemoryAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET VOICEMESSAGECHANNEL");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            // channel 0 means "nothing selected" (stopped) — same rule as
-            // the Mac app's own refreshVoiceMessage, only apply a real
-            // (>0) selection.
-            if (parts.Length == 2 && parts[0] == "VOICEMESSAGECHANNEL" && int.TryParse(parts[1], out var ch) && ch > 0)
-            {
-                SelectedMessageChannel = ch;
-                foreach (var o in MessageChannelOptions) o.IsActive = o.Value == ch;
-                MessageCell.CurrentDisplayName = ch.ToString();
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.RefreshVoiceMessageChannelAsync();
+        // channel 0 means "nothing selected" (stopped) — only apply a real
+        // (>0) selection.
+        var ch = _radio.VoiceMessageChannel;
+        if (ch <= 0) return;
+        SelectedMessageChannel = ch;
+        foreach (var o in MessageChannelOptions) o.IsActive = o.Value == ch;
+        MessageCell.CurrentDisplayName = ch.ToString();
     }
 
-    private async Task ZeroInAsync()
-    {
-        try
-        {
-            var reply = await _bridge.SendAsync("SET ZIN TRIGGER");
-            if (reply != "OK") LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
-    }
+    private async Task ZeroInAsync() => await _radio.TriggerZeroInAsync();
 
-    /// A channel tap plays it back (PB) — unless MEM is currently armed,
-    /// in which case tapping a different channel re-targets the recording
+    /// A channel tap plays it back (PB) — unless MEM is currently armed, in
+    /// which case tapping a different channel re-targets the recording
     /// (LM0 for the new channel) and restarts the countdown instead of
     /// previewing, matching the radio's own re-arm behavior (see
     /// ArmMessageRecording).
@@ -779,40 +724,14 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         foreach (var o in MessageChannelOptions) o.IsActive = o.Value == channel;
         MessageCell.CurrentDisplayName = channel.ToString();
         if (MessageArmed) ArmMessageRecording();
-        else _ = SetMessagePlaybackAsync(channel);
-    }
-
-    private async Task SetMessagePlaybackAsync(int channel)
-    {
-        try
-        {
-            var reply = await _bridge.SendAsync($"SET MESSAGEPLAYBACK {channel}");
-            if (reply != "OK") LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        else _ = _radio.SetMessagePlaybackAsync(channel);
     }
 
     private void ArmMessageRecording()
     {
-        _ = SetVoiceMessageChannelAsync(SelectedMessageChannel);
+        _ = _radio.SetVoiceMessageChannelAsync(SelectedMessageChannel);
         MessageArmed = true;
         _ = RunMessageArmTimeoutAsync();
-    }
-
-    private async Task SetVoiceMessageChannelAsync(int channel)
-    {
-        try
-        {
-            var reply = await _bridge.SendAsync($"SET VOICEMESSAGECHANNEL {channel}");
-            if (reply != "OK") LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
     }
 
     private async Task RunMessageArmTimeoutAsync()
@@ -830,160 +749,40 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         }
     }
 
-    // MARK: - RECORD/PLAY
+    // MARK: - RECORD/PLAY/Live Monitor stubs — see this region's property
+    // declarations above for why. SdRecording (LM1, real CAT) still works;
+    // everything Mac-audio-only below is inert until the Windows-audio step.
 
-    /// Mirrors the Mac app's own sdRecordButton exactly: one press toggles
-    /// both the radio's own SD-card recording AND the Mac-local capture
-    /// together, in that order — `SdRecording`'s own ToggleCommand handles
-    /// the SD-card half (and its IsOn is what this button's style/label
-    /// reflect), this just adds the second half on top of it.
-    private async Task ToggleRecordAsync()
+    /// The SD-card CAT recording (LM1, via SdRecording) works standalone;
+    /// the local-audio-file capture the Mac/bridge apps also did on every
+    /// press has no Windows equivalent yet, so this only drives the CAT half.
+    private Task ToggleRecordAsync()
     {
-        var turningOn = !SdRecording.IsOn;
         SdRecording.ToggleCommand.Execute(null);
-        try
-        {
-            var reply = await _bridge.SendAsync(turningOn ? "SET RECORD START" : "SET RECORD STOP");
-            if (reply != "OK") LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        return Task.CompletedTask;
     }
 
-    private async Task ToggleAudioMonitorAsync()
+    private Task ToggleAudioMonitorAsync()
     {
-        var turningOn = !AudioMonitorOn;
-        try
-        {
-            var reply = await _bridge.SendAsync(turningOn ? "SET MONITOR START" : "SET MONITOR STOP");
-            if (reply == "OK") AudioMonitorOn = turningOn;
-            else LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        LastError = "Live Monitor needs Windows audio support, not implemented yet.";
+        return Task.CompletedTask;
     }
 
-    private async Task RefreshAudioMonitorAsync()
+    private Task RefreshAudioMonitorAsync() => Task.CompletedTask;
+
+    private Task RefreshRecordingsAsync() => Task.CompletedTask;
+
+    private Task PlayRecordingAsync(RecordingEntryViewModel recording)
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET MONITOR");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 2 && parts[0] == "MONITOR") AudioMonitorOn = parts[1] == "1";
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        LastError = "Playback needs Windows audio support, not implemented yet.";
+        return Task.CompletedTask;
     }
 
-    private async Task RefreshRecordingsAsync()
-    {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET RECORDINGS");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            // "RECORDINGS <count> <id>|<epochSeconds>|<freqHz>|<mode>|<durationSeconds> ..."
-            if (parts.Length < 2 || parts[0] != "RECORDINGS" || !int.TryParse(parts[1], out var count)) return;
+    private Task DeleteRecordingAsync(RecordingEntryViewModel recording) => Task.CompletedTask;
 
-            var selectedId = SelectedRecording?.Id;
-            Recordings.Clear();
-            for (var i = 0; i < count && i + 2 < parts.Length; i++)
-            {
-                var fields = parts[i + 2].Split('|');
-                if (fields.Length != 5) continue;
-                if (!long.TryParse(fields[1], out var epochSeconds)) continue;
-                if (!int.TryParse(fields[2], out var freqHz)) continue;
-                var mode = fields[3].Replace('_', ' ');
-                if (!double.TryParse(fields[4], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var duration)) continue;
-                var timestamp = DateTimeOffset.FromUnixTimeSeconds(epochSeconds);
-                Recordings.Add(new RecordingEntryViewModel(fields[0], timestamp, freqHz, mode, duration, r => _ = PlayRecordingAsync(r), r => _ = DeleteRecordingAsync(r)));
-            }
-            // Restore the selection across a refresh (by id) rather than
-            // letting it silently drop to null every ~2s poll tick.
-            if (selectedId != null) SelectedRecording = Recordings.FirstOrDefault(r => r.Id == selectedId);
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
-    }
+    private Task StopPlaybackAsync() => Task.CompletedTask;
 
-    /// Backs each PLAY LIST entry's own PlayCommand — plays that specific
-    /// recording and tracks it as SelectedRecording so Stop still targets
-    /// the right one.
-    private async Task PlayRecordingAsync(RecordingEntryViewModel recording)
-    {
-        SelectedRecording = recording;
-        try
-        {
-            var reply = await _bridge.SendAsync($"SET PLAY {recording.Id}");
-            if (reply != "OK") LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
-    }
-
-    /// Backs each PLAY LIST entry's own DeleteCommand — permanently
-    /// removes that recording from the Mac (not the radio's own SD card;
-    /// RECORD captures locally on the Mac via ReceivedAudioRecorder, same
-    /// as the Mac app's own button — see MainViewModel's RECORD/PLAY
-    /// comment). Added to the bridge 2026-09-04: "SET DELETE &lt;id&gt;" ->
-    /// OK, or "ERR recording not found: &lt;id&gt;" / "ERR bad recording id:
-    /// &lt;id&gt;" on failure.
-    private async Task DeleteRecordingAsync(RecordingEntryViewModel recording)
-    {
-        try
-        {
-            var reply = await _bridge.SendAsync($"SET DELETE {recording.Id}");
-            if (reply == "OK")
-            {
-                Recordings.Remove(recording);
-                if (SelectedRecording == recording) SelectedRecording = null;
-            }
-            else
-            {
-                LastError = reply;
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
-    }
-
-    private async Task StopPlaybackAsync()
-    {
-        try
-        {
-            var reply = await _bridge.SendAsync("SET PLAY STOP");
-            if (reply != "OK") LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
-    }
-
-    private async Task RefreshPlaybackStatusAsync()
-    {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET PLAY");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 3 && parts[0] == "PLAY") IsPlayingOnMac = parts[2] == "1";
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
-    }
+    private Task RefreshPlaybackStatusAsync() => Task.CompletedTask;
 
     // MARK: - Scan/Split
 
@@ -1001,32 +800,16 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task RefreshSubFrequencyAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET SUBFREQ");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 2 && parts[0] == "SUBFREQ" && long.TryParse(parts[1], out var hz)) SubFrequencyHz = hz;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.RefreshSubFrequencyAsync();
+        SubFrequencyHz = _radio.SubFrequencyHz;
     }
 
     private async Task SetSubFrequencyAsync()
     {
         if (!double.TryParse(SubFrequencyEntryText, out var mhz)) return;
-        var hz = (long)Math.Round(mhz * 1_000_000);
-        try
-        {
-            var reply = await _bridge.SendAsync($"SET SUBFREQ {hz}");
-            if (reply == "OK") SubFrequencyHz = hz;
-            else LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        var hz = (int)Math.Round(mhz * 1_000_000);
+        await _radio.SetSubFrequencyAsync(hz);
+        SubFrequencyHz = _radio.SubFrequencyHz;
     }
 
     // MARK: - Presets (property declarations above, near SetSubFrequencyCommand)
@@ -1037,14 +820,13 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     /// Preamp aren't wrapped in one of those (they're bespoke properties)
     /// and so are captured/applied separately below.
     ///
-    /// TxSide (bridge name TXSIDE) is deliberately excluded — confirmed on
-    /// hardware 2026-09-04 that issuing "SET TXSIDE" at all switches the
-    /// radio's currently-active VFO (MAIN/SUB), not just which side
-    /// transmits during split. That's a much bigger, more visible effect
-    /// than "restore the split TX-side setting" is supposed to have, so
-    /// Presets leaves MAIN/SUB selection alone entirely rather than risk
-    /// silently flipping it on every recall.
-    private IEnumerable<IBridgeSetting> AllPresetSettings => new IBridgeSetting[]
+    /// TxSide is deliberately excluded — confirmed on hardware that issuing
+    /// a TX-side Set at all switches the radio's currently-active VFO
+    /// (MAIN/SUB), not just which side transmits during split. That's a
+    /// much bigger, more visible effect than "restore the split TX-side
+    /// setting" is supposed to have, so Presets leaves MAIN/SUB selection
+    /// alone entirely rather than risk silently flipping it on every recall.
+    private IEnumerable<ISettingBinding> AllPresetSettings => new ISettingBinding[]
     {
         DPeak, DColor, DContrast, DimmerBrightness, DimmerLed, ProcLevel,
         NoiseBlanker, NoiseReduction, MicGain, AmcLevel, VoxGain, VoxDelay,
@@ -1072,7 +854,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         foreach (var setting in AllPresetSettings)
         {
             var raw = await setting.CaptureRawAsync();
-            if (raw != null) data.Values[setting.BridgeName] = raw;
+            if (raw != null) data.Values[setting.Id] = raw;
         }
 
         _settings.Presets.Add(data);
@@ -1084,42 +866,36 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     /// Order matters: mode/frequency first (several other settings — Mic
     /// EQ/Keyer availability, ANT's HF gate, Preamp's band-dependent option
     /// set — depend on them), then the bespoke scalars, then everything
-    /// else via IBridgeSetting.
+    /// else via ISettingBinding.
     private async Task RecallPresetAsync(PresetData data)
     {
-        try
+        if (data.ModeCode is char modeCode)
         {
-            if (data.ModeCode is char modeCode)
-            {
-                var mode = RadioModeInfo.All.FirstOrDefault(m => m.CatCode() == modeCode);
-                await SetModeAsync(mode);
-            }
-            if (data.FrequencyHz is long freq)
-            {
-                var reply = await _bridge.SendAsync($"SET FREQ {freq}");
-                if (reply == "OK") { FrequencyHz = freq; UpdateBandHighlight(); UpdatePreampBandIfNeeded(); }
-                else LastError = reply;
-            }
-            if (data.DLevel is double dLevel)
-            {
-                var reply = await _bridge.SendAsync($"SET SCOPELEVEL {dLevel.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}");
-                if (reply == "OK") DLevel = dLevel; else LastError = reply;
-            }
-            if (data.RfPowerWatts is int watts)
-            {
-                var reply = await _bridge.SendAsync($"SET POWER {watts}");
-                if (reply == "OK") RfPowerWatts = watts; else LastError = reply;
-            }
-            if (data.PreampValue is int preamp) await SetPreampAsync(preamp);
-
-            foreach (var setting in AllPresetSettings)
-            {
-                if (data.Values.TryGetValue(setting.BridgeName, out var raw)) await setting.ApplyRawAsync(raw);
-            }
+            var mode = RadioModeInfo.All.FirstOrDefault(m => m.CatCode() == modeCode);
+            await SetModeAsync(mode);
         }
-        catch (Exception ex)
+        if (data.FrequencyHz is long freq)
         {
-            LastError = ex.Message;
+            await _radio.SetFrequencyAsync((int)freq);
+            FrequencyHz = _radio.FrequencyHz;
+            UpdateBandHighlight();
+            UpdatePreampBandIfNeeded();
+        }
+        if (data.DLevel is double dLevel)
+        {
+            await _radio.SetScopeLevelAsync(dLevel);
+            DLevel = _radio.ScopeLevelDb;
+        }
+        if (data.RfPowerWatts is int watts)
+        {
+            await _radio.SetRfPowerAsync(watts);
+            RfPowerWatts = _radio.PowerWatts;
+        }
+        if (data.PreampValue is int preamp) await SetPreampAsync(preamp);
+
+        foreach (var setting in AllPresetSettings)
+        {
+            if (data.Values.TryGetValue(setting.Id, out var raw)) await setting.ApplyRawAsync(raw);
         }
     }
 
@@ -1158,8 +934,6 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private bool CanConnect() =>
         ConnectionState != ConnectionState.Connecting
-        && !string.IsNullOrWhiteSpace(BridgeHost)
-        && int.TryParse(BridgePort, out _)
         && !string.IsNullOrWhiteSpace(SelectedCat1Port)
         && int.TryParse(Cat1Baud, out _);
 
@@ -1183,182 +957,102 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         SavePresetCommand.RaiseCanExecuteChanged();
     }
 
-    // MARK: - Bridge operations
+    // MARK: - Connection
 
-    private async Task EnsureBridgeOpenAsync()
+    private Task RefreshPortsAsync()
     {
-        if (_bridge.IsOpen) return;
-        if (!int.TryParse(BridgePort, out var port)) throw new ArgumentException("Bad bridge port");
-        await _bridge.OpenAsync(BridgeHost, port);
-    }
-
-    private async Task RefreshPortsAsync()
-    {
-        try
-        {
-            await EnsureBridgeOpenAsync();
-            var reply = await _bridge.SendAsync("PORTS");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            AvailablePorts.Clear();
-            foreach (var p in parts.Skip(1)) AvailablePorts.Add(p);
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        AvailablePorts.Clear();
+        foreach (var p in SerialPort.GetPortNames().OrderBy(p => p, StringComparer.OrdinalIgnoreCase)) AvailablePorts.Add(p);
+        return Task.CompletedTask;
     }
 
     private async Task ConnectAsync()
     {
-        ConnectionState = ConnectionState.Connecting;
         LastError = null;
+        if (!int.TryParse(Cat1Baud, out var baud1))
+        {
+            LastError = "Bad CAT-1 baud rate";
+            return;
+        }
+
+        WindowsSerialTransport cat1Transport = new(SelectedCat1Port!, baud1);
+        WindowsSerialTransport? cat2Transport = null;
+        if (!string.IsNullOrWhiteSpace(SelectedCat2Port) && int.TryParse(Cat2Baud, out var baud2))
+        {
+            cat2Transport = new WindowsSerialTransport(SelectedCat2Port, baud2);
+        }
+
         try
         {
-            await EnsureBridgeOpenAsync();
-
-            var cmd = $"CONNECT {SelectedCat1Port} {Cat1Baud}";
-            if (!string.IsNullOrWhiteSpace(SelectedCat2Port) && int.TryParse(Cat2Baud, out _))
-            {
-                cmd += $" {SelectedCat2Port} {Cat2Baud}";
-            }
-
-            var reply = await _bridge.SendAsync(cmd);
-            if (reply != "OK")
-            {
-                ConnectionState = ConnectionState.Failed;
-                LastError = reply;
-
-                // Distinguished from other CONNECT failures (bad port, bad
-                // baud, permission denied) by a stable "ERR PORT_BUSY:"
-                // prefix (Mac-side spec confirmed 2026-09-05) — the radio's
-                // serial port can only be held by one process at a time,
-                // and FTX1Controller (the Mac GUI app) is the other most
-                // likely holder since it duplicates the bridge's own
-                // connection logic. A popup here (rather than just the
-                // small red LastError text) makes sure this specific,
-                // easy-to-miss cause is actually noticed.
-                if (reply.StartsWith("ERR PORT_BUSY:", StringComparison.Ordinal))
-                {
-                    MessageBox.Show(
-                        "Can't connect — the radio's serial port is already in use, most likely by FTX1Controller running on the Mac.\n\nDisconnect it there first, then try again.",
-                        "Port Busy",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning);
-                }
-                return;
-            }
-
-            ConnectionState = ConnectionState.Connected;
-
-            _settings.BridgeHost = BridgeHost;
-            _settings.Cat1Port = SelectedCat1Port;
-            _settings.Cat2Port = SelectedCat2Port;
-            _settings.Save();
-
-            await RefreshAllAsync();
-            StartPolling();
+            await _radio.ConnectAsync(cat1Transport, cat2Transport);
         }
-        catch (Exception ex)
+        catch (UnauthorizedAccessException)
         {
-            ConnectionState = ConnectionState.Failed;
-            LastError = ex.Message;
+            // The Windows analog of the Mac app's TIOCEXCL/EBUSY case — the
+            // COM port is already open elsewhere (most likely another copy
+            // of this app, a terminal program, or Windows itself still
+            // settling right after the device was plugged in).
+            MessageBox.Show(
+                "Can't connect — the selected COM port is already in use by another program.\n\nClose whatever else might have it open, then try again.",
+                "Port Busy",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
         }
+        catch (Exception)
+        {
+            // ConnectionState/LastError are already updated via the
+            // PropertyChanged forwarding subscription in the constructor.
+            return;
+        }
+
+        if (_radio.ConnectionState != ConnectionState.Connected) return;
+
+        _settings.Cat1Port = SelectedCat1Port;
+        _settings.Cat2Port = SelectedCat2Port;
+        _settings.Save();
+
+        await RefreshAllAsync();
+        StartPolling();
     }
 
     private async Task DisconnectAsync()
     {
         StopPolling();
-        try
-        {
-            await _bridge.SendAsync("DISCONNECT");
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
-        finally
-        {
-            ConnectionState = ConnectionState.Disconnected;
-        }
+        await _radio.DisconnectAsync();
     }
 
     private async Task SetFrequencyAsync()
     {
         if (!double.TryParse(DirectEntryText, out var mhz)) return;
-        var hz = (long)Math.Round(mhz * 1_000_000);
-        try
-        {
-            var reply = await _bridge.SendAsync($"SET FREQ {hz}");
-            if (reply == "OK")
-            {
-                FrequencyHz = hz;
-                UpdateBandHighlight();
-                UpdatePreampBandIfNeeded();
-            }
-            else
-            {
-                LastError = reply;
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        var hz = (int)Math.Round(mhz * 1_000_000);
+        await _radio.SetFrequencyAsync(hz);
+        FrequencyHz = _radio.FrequencyHz;
+        UpdateBandHighlight();
+        UpdatePreampBandIfNeeded();
     }
 
     private async Task TogglePttAsync()
     {
-        try
-        {
-            var target = !IsTransmitting;
-            var reply = await _bridge.SendAsync($"SET PTT {(target ? 1 : 0)}");
-            if (reply == "OK") IsTransmitting = target;
-            else LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.SetTransmitAsync(!IsTransmitting);
+        IsTransmitting = _radio.IsTransmitting;
     }
 
     private async Task SetModeAsync(RadioMode mode)
     {
-        try
-        {
-            var reply = await _bridge.SendAsync($"SET MODE {mode.CatCode()}");
-            if (reply == "OK")
-            {
-                _modeCode = mode.CatCode();
-                ModeDisplayName = mode.DisplayName();
-                UpdateModeHighlight();
-                OnModeCodeChanged();
-            }
-            else
-            {
-                LastError = reply;
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.SetModeAsync(mode);
+        _modeCode = _radio.ModeCode;
+        ModeDisplayName = _radio.ModeDisplayName;
+        UpdateModeHighlight();
+        OnModeCodeChanged();
     }
 
     private async Task SetBandAsync(BandCode band)
     {
-        try
-        {
-            var reply = await _bridge.SendAsync($"SET BAND {band.Code()}");
-            if (reply != "OK") LastError = reply;
-            // BS is fire-and-forget with no read-back (same as the Mac
-            // app) — the next poll tick's frequency read will pick up the
-            // radio's new frequency and re-derive the band highlight from
-            // it, same as BandCodeInfo.FromFrequency does everywhere else.
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.SetBandAsync(band);
+        // BS is fire-and-forget with no read-back (same as the Mac app) —
+        // the next poll tick's frequency read will pick up the radio's new
+        // frequency and re-derive the band highlight from it.
     }
 
     private async Task RefreshAllAsync()
@@ -1377,78 +1071,37 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task RefreshFrequencyAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET FREQ");
-            // "FREQ <hz>"
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 2 && parts[0] == "FREQ" && long.TryParse(parts[1], out var hz))
-            {
-                FrequencyHz = hz;
-                UpdateBandHighlight();
-                UpdatePreampBandIfNeeded();
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.RefreshFrequencyAsync();
+        FrequencyHz = _radio.FrequencyHz;
+        UpdateBandHighlight();
+        UpdatePreampBandIfNeeded();
     }
 
     private async Task RefreshModeAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET MODE");
-            // "MODE <code> <displayName...>"
-            var parts = reply.Split(' ', 3, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 3 && parts[0] == "MODE" && parts[1].Length == 1)
-            {
-                _modeCode = parts[1][0];
-                ModeDisplayName = parts[2];
-                UpdateModeHighlight();
-                OnModeCodeChanged();
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.RefreshModeAsync();
+        _modeCode = _radio.ModeCode;
+        ModeDisplayName = _radio.ModeDisplayName;
+        UpdateModeHighlight();
+        OnModeCodeChanged();
     }
 
     private async Task RefreshPttAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET PTT");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 2 && parts[0] == "PTT")
-            {
-                IsTransmitting = parts[1] == "1";
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.RefreshPttAsync();
+        IsTransmitting = _radio.IsTransmitting;
     }
 
     private async Task RefreshMetersAsync()
     {
-        try
+        if (await _radio.RefreshMeterAsync(MeterKind.SMeterMain) is { } s) SMeterValue = s;
+        if (IsTransmitting)
         {
-            var reply = await _bridge.SendAsync("GET METERS");
-            // "METERS S<val> PO<val>"
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 3 && parts[0] == "METERS")
-            {
-                if (parts[1].StartsWith("S") && int.TryParse(parts[1].AsSpan(1), out var s)) SMeterValue = s;
-                if (parts[2].StartsWith("PO") && int.TryParse(parts[2].AsSpan(2), out var po)) PowerOutputValue = po;
-            }
+            if (await _radio.RefreshMeterAsync(MeterKind.PowerOutput) is { } po) PowerOutputValue = po;
         }
-        catch (Exception ex)
+        else
         {
-            LastError = ex.Message;
+            PowerOutputValue = 0;
         }
     }
 
@@ -1463,8 +1116,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         foreach (var b in BandButtons) b.IsActive = current.HasValue && b.Band == current.Value;
     }
 
-    /// Same reaction as the Mac app's own `onChange(of: radio.modeCode)` —
-    /// if a mode change makes the current AF/RF/SQL selection invalid (e.g.
+    /// If a mode change makes the current AF/RF/SQL selection invalid (e.g.
     /// RF selected, then the mode switches to an SQL-only one), fall back
     /// to AF rather than silently leaving an inapplicable target selected.
     private void OnModeCodeChanged()
@@ -1481,168 +1133,68 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task CycleClarifierAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("SET CLAR CYCLE");
-            if (reply == "OK") await RefreshClarifierAsync();
-            else LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.CycleClarifierAsync();
+        ClarifierRxOn = _radio.ClarifierRxOn;
+        ClarifierTxOn = _radio.ClarifierTxOn;
     }
 
     private async Task AdjustClarifierOffsetAsync(int delta)
     {
-        try
-        {
-            var target = Math.Clamp(ClarifierOffsetHz + delta, -9999, 9999);
-            var reply = await _bridge.SendAsync($"SET CLAR OFFSET {target}");
-            if (reply == "OK") ClarifierOffsetHz = target;
-            else LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        var target = Math.Clamp(ClarifierOffsetHz + delta, -9999, 9999);
+        await _radio.SetClarifierFrequencyAsync(target);
+        ClarifierOffsetHz = _radio.ClarifierOffsetHz;
     }
 
     private async Task RefreshClarifierAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET CLAR");
-            // "CLAR <rx 0/1> <tx 0/1> <offsetHz>"
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 4 && parts[0] == "CLAR")
-            {
-                ClarifierRxOn = parts[1] == "1";
-                ClarifierTxOn = parts[2] == "1";
-                if (int.TryParse(parts[3], out var offset)) ClarifierOffsetHz = offset;
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.RefreshClarifierAsync();
+        ClarifierRxOn = _radio.ClarifierRxOn;
+        ClarifierTxOn = _radio.ClarifierTxOn;
+        ClarifierOffsetHz = _radio.ClarifierOffsetHz;
     }
 
     // MARK: - Fine/Fast (FN)
 
     private async Task CycleFineTuningAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("SET FINE CYCLE");
-            if (reply == "OK") await RefreshFineTuningAsync();
-            else LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.CycleFineTuningAsync();
+        FineTuningDisplayName = _radio.FineTuningState.DisplayName();
     }
 
     private async Task RefreshFineTuningAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("GET FINE");
-            var parts = reply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length == 2 && parts[0] == "FINE") FineTuningDisplayName = parts[1];
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.RefreshFineTuningAsync();
+        FineTuningDisplayName = _radio.FineTuningState.DisplayName();
     }
 
     // MARK: - QMB (QI/QR) — Set-only, no read-back on either side.
 
     private async Task QmbRecallAsync()
     {
-        try
-        {
-            var reply = await _bridge.SendAsync("SET QMB RECALL");
-            if (reply == "OK") await RefreshFrequencyAsync();
-            else LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.QmbRecallAsync();
+        await RefreshFrequencyAsync();
     }
 
-    private async Task QmbStoreAsync()
-    {
-        try
-        {
-            var reply = await _bridge.SendAsync("SET QMB STORE");
-            if (reply != "OK") LastError = reply;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
-    }
+    private async Task QmbStoreAsync() => await _radio.QmbStoreAsync();
 
-    // MARK: - VFO step size (no new bridge command — reuses SET FREQ)
-
-    /// Ported 1:1 from RadioController.swift's own `vfoStepHz` — step size
-    /// depends on the current mode's "fine step group" and the FINE/FAST
-    /// state, exactly matching the physical VFO knob rather than a fixed
-    /// step.
-    private static readonly HashSet<char> FineStepGroupA = new() { '1', '2', '3', '7', '8', 'C', '6', '9', 'E' };
-
-    private int VfoStepHz
-    {
-        get
-        {
-            var isGroupA = FineStepGroupA.Contains(_modeCode);
-            return (isGroupA, FineTuningDisplayName) switch
-            {
-                (true, "OFF") => 20,
-                (true, "FINE") => 1,
-                (true, "FAST") => 200,
-                (false, "OFF") => 100,
-                (false, "FINE") => 10,
-                (false, "FAST") => 1000,
-                _ => isGroupA ? 20 : 100,
-            };
-        }
-    }
+    // MARK: - VFO step size (no CAT command of its own — reuses SetFrequency)
 
     /// Public, properly-awaitable entry point for the VFO dial (unlike
     /// VfoStepUpCommand/DownCommand — RelayCommand.Execute is
     /// fire-and-forget, so the dial's code-behind handler has no way to
-    /// know when one bridge round-trip finishes before starting the next.
-    /// Confirmed on hardware 2026-09-04: firing steps concurrently instead
-    /// of one-at-a-time backed up the bridge's semaphore badly enough to
-    /// look like the whole app had locked up.
+    /// know when one CAT round-trip finishes before starting the next.
+    /// Firing steps concurrently against a half-duplex single-outstanding-
+    /// command serial link is exactly the kind of thing that would back up
+    /// badly enough to look like the whole app had locked up.
     public Task StepFrequencyAsync(int direction) => AdjustFrequencyAsync(direction);
 
     private async Task AdjustFrequencyAsync(int steps)
     {
-        var target = FrequencyHz + steps * VfoStepHz;
-        try
-        {
-            var reply = await _bridge.SendAsync($"SET FREQ {target}");
-            if (reply == "OK")
-            {
-                FrequencyHz = target;
-                UpdateBandHighlight();
-                UpdatePreampBandIfNeeded();
-            }
-            else
-            {
-                LastError = reply;
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        var target = (int)(FrequencyHz + steps * (long)_radio.VfoStepHz);
+        await _radio.SetFrequencyAsync(target);
+        FrequencyHz = _radio.FrequencyHz;
+        UpdateBandHighlight();
+        UpdatePreampBandIfNeeded();
     }
 
     // MARK: - MAIN AF/RF/SQL knob
@@ -1655,63 +1207,39 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task AdjustSubDialAsync(int delta)
     {
-        try
+        switch (SubDialTarget)
         {
-            switch (SubDialTarget)
-            {
-                case SubDialTarget.Af:
-                    var af = Math.Clamp(AfGain + delta, 0, 255);
-                    var afReply = await _bridge.SendAsync($"SET AFGAIN {af}");
-                    if (afReply == "OK") AfGain = af; else LastError = afReply;
-                    break;
-                case SubDialTarget.Rf:
-                    var rf = Math.Clamp(RfGain + delta, 0, 255);
-                    var rfReply = await _bridge.SendAsync($"SET RFGAIN {rf}");
-                    if (rfReply == "OK") RfGain = rf; else LastError = rfReply;
-                    break;
-                case SubDialTarget.Sql:
-                    var sq = Math.Clamp(Squelch + delta, 0, 255);
-                    var sqReply = await _bridge.SendAsync($"SET SQUELCH {sq}");
-                    if (sqReply == "OK") Squelch = sq; else LastError = sqReply;
-                    break;
-            }
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
+            case SubDialTarget.Af:
+                await _radio.SetAfGainAsync(Math.Clamp(AfGain + delta, 0, 255));
+                AfGain = _radio.AfGain;
+                break;
+            case SubDialTarget.Rf:
+                await _radio.SetRfGainAsync(Math.Clamp(RfGain + delta, 0, 255));
+                RfGain = _radio.RfGain;
+                break;
+            case SubDialTarget.Sql:
+                await _radio.SetSquelchAsync(Math.Clamp(Squelch + delta, 0, 255));
+                Squelch = _radio.SquelchLevel;
+                break;
         }
     }
 
     private async Task RefreshSubDialValuesAsync()
     {
-        try
-        {
-            var afReply = await _bridge.SendAsync("GET AFGAIN");
-            var afParts = afReply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (afParts.Length == 2 && afParts[0] == "AFGAIN" && int.TryParse(afParts[1], out var af)) AfGain = af;
-
-            var rfReply = await _bridge.SendAsync("GET RFGAIN");
-            var rfParts = rfReply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (rfParts.Length == 2 && rfParts[0] == "RFGAIN" && int.TryParse(rfParts[1], out var rf)) RfGain = rf;
-
-            var sqReply = await _bridge.SendAsync("GET SQUELCH");
-            var sqParts = sqReply.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (sqParts.Length == 2 && sqParts[0] == "SQUELCH" && int.TryParse(sqParts[1], out var sq)) Squelch = sq;
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-        }
+        await _radio.RefreshAfGainAsync();
+        AfGain = _radio.AfGain;
+        await _radio.RefreshRfGainAsync();
+        RfGain = _radio.RfGain;
+        await _radio.RefreshSquelchAsync();
+        Squelch = _radio.SquelchLevel;
     }
 
     // MARK: - Polling (250ms meters; every 8th tick = 2s also freq/mode/PTT
     // plus one of four rotating groups: FUNC Page 1 Display, FUNC Page 1
-    // TX/Audio core, FUNC Page 2 (CW), Scan/Split — same cadence/rotation idea
-    // as RadioController.startPolling() in the Mac app. FUNC Page 1 used to
-    // only be read once, right after connect, so any change made from the
-    // radio's own front panel (not via CAT) was never picked back up —
-    // confirmed on hardware 2026-09-03 for D-Level/D-Peak/D-Color, which
-    // all share this poll loop.)
+    // TX/Audio core, FUNC Page 2 (CW), Scan/Split — same cadence/rotation
+    // idea as RadioController.startPolling() in the Mac app, but driven
+    // from here since this app's RadioController deliberately doesn't run
+    // its own poll loop.
 
     private void StartPolling()
     {
@@ -1756,7 +1284,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     public void Dispose()
     {
         StopPolling();
-        _ = _bridge.DisposeAsync();
+        _ = _radio.DisconnectAsync();
     }
 }
 
@@ -1831,20 +1359,13 @@ public sealed class PresetViewModel : ObservableObject
     }
 }
 
-/// One row in the Recordings list — a Mac-local audio file, listed via
-/// "GET RECORDINGS" (see MainViewModel's own RECORD/PLAY comment). `Id` is
-/// the recording's UUID exactly as the bridge reports it, opaque to this
-/// app beyond round-tripping it back in "SET PLAY <id>".
+/// One row in the Recordings list — inert until Windows audio support
+/// exists (see this file's RECORD/PLAY/Live Monitor region).
 public sealed class RecordingEntryViewModel
 {
     public string Id { get; }
     public string DisplayName { get; }
     public RelayCommand PlayCommand { get; }
-
-    /// Backed by "SET DELETE &lt;id&gt;" (added to the bridge 2026-09-04).
-    /// `onDelete` is nullable/CanExecute-gated rather than assumed non-null
-    /// so a caller without a real delete handler still gets a safely
-    /// disabled button instead of a NullReferenceException.
     public RelayCommand DeleteCommand { get; }
 
     public RecordingEntryViewModel(string id, DateTimeOffset timestamp, int frequencyHz, string mode, double durationSeconds,
