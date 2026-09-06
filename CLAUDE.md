@@ -29,27 +29,52 @@ architecture, but currently the least complete functionally:
    `ViewModels/MainViewModel.cs` with direct serial CAT I/O, porting the protocol
    logic from the Mac app (#1) instead of going through #2's bridge.
 
+The Mac app's source is cloned **read-only** at `C:\Users\maswe\FTX1Controller-MacRef`
+for reference — never edit or commit anything there.
+
 ## Current status
 
 - Project scaffolded via `dotnet new wpf` (net8.0-windows), building cleanly.
 - Full UI/ViewModel/Model layer copied from `M:\FTX1ControllerWin` and
-  namespace-renamed to `FTX1WinController`. This gives a working visual starting
-  point but the app currently still assumes a bridge connection
-  (`Bridge/BridgeClient.cs`) — that's the next thing to replace, not something
-  that already works standalone.
-- The FTX-1's USB-C cable is now physically connected to this Windows laptop
+  namespace-renamed to `FTX1WinController`. The app still assumes a bridge
+  connection (`Bridge/BridgeClient.cs`, `ViewModels/MainViewModel.cs`) — that
+  code is untouched so far.
+- **The CAT protocol layer has been ported** into `src/FTX1WinController/Cat/`:
+  `CatCommands` (+`.Dsp.cs`/`.Func.cs`/`.Vfo.cs` partials) is a faithful 1:1
+  translation of the Mac app's `CATProtocol(V2/V3/V4).swift` — every command,
+  encoding, and documented quirk, including the four below. `CatConnection`
+  ports the Mac's half-duplex FIFO command queue (1.2s timeout, `;`-framing,
+  40ms fire-and-forget pacing) against a new `ISerialTransport` abstraction
+  (not `System.IO.Ports.SerialPort` directly, so this layer needs no real
+  hardware to build or test). `RadioController` is the stateful facade
+  (ported from `RadioController(V2/V3/V4).swift`) exposing async
+  Set/Refresh methods and published state, including the trickier
+  hardware-confirmed behaviors: the QMB-recall race guard, keyer auto-off on
+  mode change, the 4-state clarifier cycle, and squelch/RF-gain display
+  swap by mode. It deliberately does **not** run its own poll loop —
+  `MainViewModel`'s existing `DispatcherTimer` loop will drive it once wired up.
+  A new xUnit project (`tests/FTX1WinController.Tests`, 46 tests) covers the
+  quirks and the connection's queueing/timeout/framing behavior with a fake
+  transport. `dotnet build` and `dotnet test` both pass clean.
+- Not yet done: a `System.IO.Ports.SerialPort`-backed `ISerialTransport`,
+  COM-port discovery/selection UI, and rewiring `MainViewModel` off
+  `BridgeClient` onto `RadioController` — see next steps.
+- The FTX-1's USB-C cable is physically connected to this Windows laptop
   (moved from the Mac). Its USB audio interface already shows up in Windows'
-  audio device list. CAT/serial connectivity has not been built or tested yet.
+  audio device list. Actual serial I/O against the real radio has not been
+  tested yet.
 
 ## Planned next steps (in order)
 
-1. **Port the CAT protocol layer** from the Mac app's Swift source to C#: every
-   command, its encoding, and the hardware-confirmed quirks below. This is a
-   translation task and doesn't require the radio to be connected.
-2. **Wire it into real serial I/O** via `System.IO.Ports.SerialPort` against the
-   two virtual COM ports the FTX-1 exposes, replacing `BridgeClient` calls in
-   `MainViewModel.cs`. This step needs the physical radio and hands-on testing
-   by the user — Claude Code cannot see or interact with the hardware directly.
+1. ~~Port the CAT protocol layer from the Mac app's Swift source to C#~~ — done,
+   see "Current status" above.
+2. **Wire it into real serial I/O**: write a `WindowsSerialTransport`
+   (`ISerialTransport` over `System.IO.Ports.SerialPort`, replicating the Mac's
+   confirmed 8N1/no-flow-control settings and exclusive-open handling), add
+   COM-port discovery/selection UI, and rewire `MainViewModel.cs` off
+   `BridgeClient` onto `RadioController`. This step needs the physical radio
+   and hands-on testing by the user — Claude Code cannot see or interact with
+   the hardware directly.
 3. Build Live Monitor / RECORD using Windows audio APIs (NAudio or Core Audio),
    now that the radio's USB audio interface is confirmed visible to Windows.
    FTX1ControllerWin has no equivalent (its bridge only carries text, not audio),

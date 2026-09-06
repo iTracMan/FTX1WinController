@@ -40,6 +40,34 @@ public static class RadioModeInfo
         _ => throw new ArgumentOutOfRangeException(nameof(mode)),
     };
 
+    /// Reverse of CatCode — used to interpret a raw `MD` reply code, which
+    /// may not correspond to any RadioMode case at all (see DisplayNameForCode).
+    public static bool TryFromCatCode(char code, out RadioMode mode)
+    {
+        foreach (var candidate in All)
+        {
+            if (candidate.CatCode() == char.ToUpperInvariant(code))
+            {
+                mode = candidate;
+                return true;
+            }
+        }
+        mode = default;
+        return false;
+    }
+
+    /// Displays a raw `MD` reply code directly, handling the one code with
+    /// no corresponding RadioMode case: the manual documents "0" as
+    /// reserved/undefined, and hardware testing confirmed it's what the
+    /// radio actually sends for MD's P2 whenever AMS has auto-selected the
+    /// mode — CAT has no way to read back which real mode AMS landed on, it
+    /// just reports this sentinel instead. Not a parse failure.
+    public static string DisplayNameForCode(char code)
+    {
+        if (code == '0') return "AMS (auto)";
+        return TryFromCatCode(code, out var mode) ? mode.DisplayName() : $"Unknown ({code})";
+    }
+
     public static string DisplayName(this RadioMode mode) => mode switch
     {
         RadioMode.Lsb => "LSB",

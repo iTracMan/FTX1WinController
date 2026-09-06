@@ -2,4 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/FTX1WinController/FTX1WinController.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FTX1WinController.Tests/FTX1WinController.Tests.csproj" />
+  </Folder>
 </Solution>
