@@ -110,10 +110,34 @@ for reference — never edit or commit anything there.
   already-listed commands firing should have re-evaluated all of them too —
   this fix is correct hygiene but **probably isn't** why ANT TUNE specifically
   didn't respond. Still unresolved — see "Open question" below.
-- **Hardware-tested once, several rounds still pending.** The FTX-1's
-  USB-C cable is physically connected to this Windows laptop; `dotnet
-  build`/`dotnet test` (47 tests) both pass. First real hardware test
-  (2026-09-06) found the issues fixed above, plus one open question below.
+- **Fixed from the second hardware test** (2026-09-06, build 21:24): turning
+  Live Monitor OFF (right after ON worked fine) crashed the whole process
+  with **no trace anywhere** — not a WPF exception dialog, not a Windows
+  Application-log/.NET Runtime fault entry, nothing — which pointed at either
+  a native-level failure in NAudio's MME calls into the FTX-1's USB Audio
+  Class driver, or an exception on one of NAudio's own background threads
+  that nothing in the app was set up to catch. Added `CrashLogger` (plain
+  text under `%AppData%\FTX1WinController\crash.log`) wired up in
+  `App.xaml.cs` via `DispatcherUnhandledException`/
+  `AppDomain.UnhandledException`/`TaskScheduler.UnobservedTaskException` —
+  previously there was no exception handling anywhere in the app, so any
+  future crash like this would otherwise still vanish without a trace.
+  `LiveAudioService.StopMonitoring`/`StopCaptureIfIdle` now update the
+  service's own state *before* calling into NAudio's `Stop()`/`Dispose()`,
+  and catch+log exceptions from that teardown instead of letting NAudio's
+  thread take the whole process down. Re-tested afterwards — 13 Monitor
+  on/off cycles total (some scripted, some by hand) plus several rounds of
+  RECORD/PLAY — all hardware-confirmed working, crash not reproduced again,
+  nothing landed in `crash.log`. This is hardening of the most likely
+  failure surface, not a confirmed root-cause fix — if it recurs,
+  `crash.log`'s contents (or continued emptiness) will say whether it's
+  catchable or still native-level.
+- **Hardware-tested twice.** The FTX-1's USB-C cable is physically connected
+  to this Windows laptop; `dotnet build`/`dotnet test` (47 tests) both pass.
+  First test (2026-09-06, build 13:29) found the issues fixed above the
+  Monitor-crash entry; second test (2026-09-06, build 21:24) found and fixed
+  the Monitor crash, and hardware-confirmed the audio features. ANT TUNE
+  (below) is the one open item from round 1 not yet revisited.
 
 ## Open question: ANT TUNE still not confirmed working
 
@@ -141,10 +165,10 @@ on the radio? If yes, suspect 1; if no, suspect 2.
 2. ~~Wire it into real serial I/O~~ — done, see "Current status" above.
 3. ~~Build Live Monitor / RECORD using Windows audio APIs~~ — done, see above.
 4. **Hardware verification, round 2+**: work through remaining issues as
-   the user finds them (ANT TUNE above is the current one), covering every
-   FUNC-grid control, Scan/Split, presets, and the new audio features
-   (device picker, MONITOR passthrough, RECORD-to-file, PLAY) against the
-   real radio.
+   the user finds them (ANT TUNE above is the current one). MONITOR
+   passthrough and RECORD-to-file/PLAY are now hardware-confirmed (see
+   "Current status"); still need every FUNC-grid control, Scan/Split,
+   presets, and the audio device picker covered against the real radio.
 
 ## Hardware-confirmed CAT quirks (from the Mac app, NOT reliably in the manual)
 
