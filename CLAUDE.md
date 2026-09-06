@@ -132,43 +132,39 @@ for reference — never edit or commit anything there.
   failure surface, not a confirmed root-cause fix — if it recurs,
   `crash.log`'s contents (or continued emptiness) will say whether it's
   catchable or still native-level.
-- **Hardware-tested twice.** The FTX-1's USB-C cable is physically connected
-  to this Windows laptop; `dotnet build`/`dotnet test` (47 tests) both pass.
-  First test (2026-09-06, build 13:29) found the issues fixed above the
-  Monitor-crash entry; second test (2026-09-06, build 21:24) found and fixed
-  the Monitor crash, and hardware-confirmed the audio features. ANT TUNE
-  (below) is the one open item from round 1 not yet revisited.
+- **Hardware-tested across three rounds so far**, all 2026-09-06. The FTX-1's
+  USB-C cable is physically connected to this Windows laptop; `dotnet
+  build`/`dotnet test` (47 tests) both pass. Round 1 (build 13:29) found the
+  issues fixed above the Monitor-crash entry, plus the ANT TUNE no-response
+  report. Round 2 (build 21:24) found and fixed the Monitor crash, and
+  hardware-confirmed the audio features. Round 3 fixed and hardware-confirmed
+  ANT TUNE — see "Resolved" below.
 
-## Open question: ANT TUNE still not confirmed working
+## Resolved: ANT TUNE now hardware-confirmed working
 
-User report: pressing ANT TUNE produces no response on the radio. The
-`RaiseCanExecuteChanged()` fix above was applied but is unlikely to be the
-actual cause (see reasoning there) — no `LastError` was reported either,
-which suggests the command reaches the radio without throwing, but the
-radio doesn't act on it. Two live suspects, not yet distinguished:
-1. **The P3=2 "start tuning" guess is wrong** — `MainViewModel.AntTuneAsync`
-   sends `_radio.SetAntennaTunerAsync('2')`, inferred from the manual's
-   "on/off/start" field ordering for the `AC` command, never independently
-   confirmed on hardware (see `CatCommands.Func.cs`'s `SetAntennaTuner` comment).
-2. **`TunerP1`/`TunerP2` weren't actually discovered from the radio** —
-   `RadioController.RefreshAntennaTunerAsync` reads bare `AC;` and expects
-   the radio to echo back which tuner unit is fitted; if that read fails
-   silently, P1/P2 stay at their `'0'`/`'0'` defaults, which may not be
-   valid identifiers for the real fitted unit, silently mismatching every AC command.
-Next diagnostic step (needs the user): does the plain Tuner ON/OFF toggle
-(right next to ANT TUNE — same `AC` command, P3=0/1) do anything visible
-on the radio? If yes, suspect 1; if no, suspect 2.
+Was suspect 1 of the two live suspects from round 1: `MainViewModel.AntTuneAsync`
+was sending `_radio.SetAntennaTunerAsync('2')` for "start tuning", guessed from
+the manual's "on/off/start" field ordering for the `AC` command — never
+independently confirmed. Checking the Mac app's canonical source
+(`RadioControllerV3.startAntennaTuning()`) showed the real value is **`P3='3'`**;
+`'2'` isn't a valid value for that field, so the radio silently ignored it (no
+`LastError`, because the command reached the radio fine — it just did nothing
+with it). Fixed by adding `RadioController.StartAntennaTuningAsync()` (P3='3',
+doesn't touch `TunerOn` — matching the Mac's split between `setTunerOn` and
+`startAntennaTuning`, since starting a tuning cycle isn't the same state as the
+Tuner on/off toggle) and pointing `AntTuneAsync` at it instead. User confirmed
+on hardware (2026-09-06) that ANT TUNE now does something on the radio.
 
 ## Planned next steps (in order)
 
 1. ~~Port the CAT protocol layer from the Mac app's Swift source to C#~~ — done.
 2. ~~Wire it into real serial I/O~~ — done, see "Current status" above.
 3. ~~Build Live Monitor / RECORD using Windows audio APIs~~ — done, see above.
-4. **Hardware verification, round 2+**: work through remaining issues as
-   the user finds them (ANT TUNE above is the current one). MONITOR
-   passthrough and RECORD-to-file/PLAY are now hardware-confirmed (see
-   "Current status"); still need every FUNC-grid control, Scan/Split,
-   presets, and the audio device picker covered against the real radio.
+4. **Hardware verification, round 2+**: work through remaining issues as the
+   user finds them. MONITOR passthrough, RECORD-to-file/PLAY, and ANT TUNE
+   are now hardware-confirmed (see "Current status" and "Resolved" above);
+   still need every other FUNC-grid control, Scan/Split, presets, and the
+   audio device picker covered against the real radio.
 
 ## Hardware-confirmed CAT quirks (from the Mac app, NOT reliably in the manual)
 

@@ -1334,7 +1334,7 @@
                             <ContentControl Grid.Row="1" Grid.Column="6" Content="{Binding ProcLevel}" ContentTemplate="{StaticResource FuncSliderPopupCellTemplate}" />
 
                             <!-- Row 3: ANT TUNE, TUNER, [blank], NB, DNR, ANT, TXW -->
-                            <Button Grid.Row="2" Grid.Column="0" Command="{Binding AntTuneCommand}" Width="72" MinHeight="40" Margin="3,5" Padding="0" HorizontalAlignment="Left" VerticalAlignment="Top">
+                            <Button Grid.Row="2" Grid.Column="0" Command="{Binding AntTuneCommand}" Width="72" MinHeight="40" Margin="3,5" Padding="0" HorizontalAlignment="Left" VerticalAlignment="Top" AutomationProperties.AutomationId="AntTuneButton">
                                 <Button.Template>
                                     <ControlTemplate TargetType="Button">
                                         <Border CornerRadius="4" BorderThickness="0.75" BorderBrush="#8C000000">

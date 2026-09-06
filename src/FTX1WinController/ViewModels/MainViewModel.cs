@@ -132,10 +132,11 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             () => _radio.AutoNotchOn, _radio.RefreshAutoNotchAsync, _radio.SetAutoNotchAsync, Connected, OnError);
         MicEq = new ToggleSettingViewModel("Mic EQ", "MICEQ",
             () => _radio.MicEqOn, _radio.RefreshMicEqAsync, _radio.SetMicEqAsync, () => Connected() && MicEqAvailable, OnError);
-        // Antenna Tuner's on/off (P3) and the momentary "start tuning"
-        // action (AntTuneCommand, below) both drive the same AC command's
-        // P3 field — P1/P2 (which tuner is fitted) are discovered from the
-        // radio's own Answer and never guessed, see RadioController.Func.cs.
+        // Antenna Tuner's on/off (P3='0'/'1') and the momentary "start
+        // tuning" action (AntTuneCommand, below, P3='3') are separate calls
+        // into RadioController that both build on the same AC command —
+        // P1/P2 (which tuner is fitted) are discovered from the radio's own
+        // Answer and never guessed, see RadioController.Func.cs.
         Tuner = new ToggleSettingViewModel("Tuner", "TUNER",
             () => _radio.TunerOn, _radio.RefreshAntennaTunerAsync, on => _radio.SetAntennaTunerAsync(on ? '1' : '0'), Connected, OnError);
         Vox = new ToggleSettingViewModel("VOX", "VOX",
@@ -664,10 +665,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         RfPowerWatts = _radio.PowerWatts;
     }
 
-    /// Sends the "start tuning" pulse (AC's P3=2, alongside 0=off/1=on for
-    /// the Tuner toggle above) — per the Yaesu manual's own "on/off/start"
-    /// wording order for this field; not yet independently hardware-confirmed.
-    private async Task AntTuneAsync() => await _radio.SetAntennaTunerAsync('2');
+    private async Task AntTuneAsync() => await _radio.StartAntennaTuningAsync();
 
     /// Same table as CatCommands.VoxDelayMs/CwBreakInDelayMs.
     private static int VoxDelayMs(int index) => index switch

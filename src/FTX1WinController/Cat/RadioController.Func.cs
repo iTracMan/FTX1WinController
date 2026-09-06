@@ -119,6 +119,16 @@ public sealed partial class RadioController
     public Task SetAntennaTunerAsync(char p3) =>
         SendSetAsync(CatCommands.SetAntennaTuner(TunerP1, TunerP2, p3), () => TunerOn = p3 != '0');
 
+    /// ANT TUNE — momentary "start tuning", P3='3' (confirmed against the
+    /// Mac app's RadioControllerV3.startAntennaTuning(); this Windows port
+    /// originally guessed P3='2' from the manual's field ordering, which is
+    /// why the button did nothing on real hardware). Doesn't touch TunerOn:
+    /// starting a tuning cycle isn't the same state as the Tuner on/off
+    /// toggle, matching the Mac app's split between setTunerOn and
+    /// startAntennaTuning.
+    public Task StartAntennaTuningAsync() =>
+        SendSetAsync(CatCommands.SetAntennaTuner(TunerP1, TunerP2, '3'), () => { });
+
     public async Task RefreshAntennaTunerAsync()
     {
         string reply;
