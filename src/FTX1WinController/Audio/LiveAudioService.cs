@@ -52,11 +52,24 @@ public sealed class LiveAudioService : IDisposable
     public void StopMonitoring()
     {
         if (!IsMonitoring) return;
-        _waveOut?.Stop();
-        _waveOut?.Dispose();
+        var waveOut = _waveOut;
         _waveOut = null;
         _monitorBuffer = null;
         IsMonitoring = false;
+        try
+        {
+            waveOut?.Stop();
+            waveOut?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            // MME teardown on some USB Audio Class codecs (this app's
+            // whole reason for existing) has been observed to throw here
+            // rather than fail cleanly — the app's local state above is
+            // already updated, so surface it as a caught error instead of
+            // letting NAudio's internal thread take the process down.
+            CrashLogger.Log("LiveAudioService.StopMonitoring", ex);
+        }
         StopCaptureIfIdle();
     }
 
@@ -102,10 +115,18 @@ public sealed class LiveAudioService : IDisposable
     private void StopCaptureIfIdle()
     {
         if (IsMonitoring || IsRecording || _waveIn == null) return;
-        _waveIn.DataAvailable -= OnDataAvailable;
-        _waveIn.StopRecording();
-        _waveIn.Dispose();
+        var waveIn = _waveIn;
         _waveIn = null;
+        waveIn.DataAvailable -= OnDataAvailable;
+        try
+        {
+            waveIn.StopRecording();
+            waveIn.Dispose();
+        }
+        catch (Exception ex)
+        {
+            CrashLogger.Log("LiveAudioService.StopCaptureIfIdle", ex);
+        }
     }
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
