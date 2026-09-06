@@ -253,7 +253,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private string? _selectedCat2Port;
     public string? SelectedCat2Port { get => _selectedCat2Port; set => SetProperty(ref _selectedCat2Port, value); }
 
-    private string _cat2Baud = "4800";
+    private string _cat2Baud = "38400";
     public string Cat2Baud { get => _cat2Baud; set => SetProperty(ref _cat2Baud, value); }
 
     // MARK: - Connection/radio state
