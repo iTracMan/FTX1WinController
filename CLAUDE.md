@@ -264,6 +264,10 @@ on hardware (2026-09-06) that ANT TUNE now does something on the radio.
    Future hardware issues the user finds should still be worked through as
    they come up, but there's no longer an open checklist of untested
    features.
+5. ~~Publish a public release~~ — done, see "Repo / distribution" below.
+   v1.0 is live as a self-contained single-file build with a working
+   GitHub Release download; code signing/SmartScreen and the MIT license
+   are the remaining open items.
 
 ## Hardware-confirmed CAT quirks (from the Mac app, NOT reliably in the manual)
 
@@ -284,6 +288,30 @@ confirming radio behavior.
 
 ## Repo / distribution
 
-GitHub: https://github.com/iTracMan/FTX1WinController.git (private for now,
-MIT license planned once ready for public release — code signing/SmartScreen
-and install docs for non-technical users still unresolved).
+GitHub: https://github.com/iTracMan/FTX1WinController.git — **repo is now
+public**.
+
+**v1.0 released** (2026-09-07): built as self-contained/single-file
+(`RuntimeIdentifier=win-x64`, `SelfContained=true`, `PublishSingleFile=true`
+in `src/FTX1WinController/FTX1WinController.csproj`) via
+`dotnet publish src/FTX1WinController/FTX1WinController.csproj -c Release`,
+output at `src/FTX1WinController/bin/Release/net8.0-windows/win-x64/publish/`.
+Not quite a true single file — WPF's native interop DLLs
+(`D3DCompiler_47_cor3.dll`, `PenImc_cor3.dll`, `PresentationNative_cor3.dll`,
+`vcruntime140_cor3.dll`, `wpfgfx_cor3.dll`) can't be embedded by
+`PublishSingleFile` and always land alongside the exe — so the release
+artifact is that whole `publish/` folder zipped up (exe + those 5 DLLs +
+`.pdb`, kept in deliberately for useful crash-log symbols), not the exe
+alone. Fixed a regression this switch caused along the way: the window
+title's build-timestamp fell back to "unknown build" under single-file
+publish because `Assembly.GetExecutingAssembly().Location` returns `""` for
+an embedded assembly — swapped to
+`Process.GetCurrentProcess().MainModule.FileName` in `MainWindow.xaml.cs`.
+No .NET Desktop Runtime install step needed for end users as a result.
+
+**GitHub Release live, download confirmed working**:
+https://github.com/iTracMan/FTX1WinController/releases/latest
+
+Code signing/SmartScreen still unresolved — the unsigned exe will likely
+trigger a SmartScreen warning on first run for end users; MIT license
+still to be added to the repo.
