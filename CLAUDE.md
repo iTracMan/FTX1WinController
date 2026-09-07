@@ -226,6 +226,19 @@ on hardware (2026-09-06) that ANT TUNE now does something on the radio.
   meter's real hardware-measured curve just above it in the same file.
   Hardware-confirmed (2026-09-07): user reports it's "as close as it ever
   needs to be" against the radio's own display.
+- **Window made resizable via a wrapping Viewbox** (2026-09-07, ahead of
+  public release — other people's monitors won't all fit the fixed
+  1129x1019 window this app has used since scaffolding). `MainWindow.xaml`'s
+  entire layout (previously inside a `ScrollViewer` with vertical scrolling
+  and horizontal clipping) is now wrapped in a single `<Viewbox
+  Stretch="Uniform">` in place of that `ScrollViewer`, and `ResizeMode`
+  changed from `NoResize` to `CanResize`. This deliberately isn't a
+  responsive redesign — every row is still Auto/fixed-width exactly as
+  before, just uniformly scaled as a whole to fit whatever size the window
+  becomes, keeping the current layout's shape and proportions intact rather
+  than reflowing anything. `Height="1019" Width="1129"` on the `Window` are
+  now just the layout's natural (1:1 scale) size, not a hard limit.
+  Build/tests clean; not yet tried on hardware/other monitors.
 
 ## Planned next steps (in order)
 

@@ -3,15 +3,21 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:controls="clr-namespace:FTX1WinController.Controls"
         xmlns:conv="clr-namespace:FTX1WinController.Converters"
-        Title="FTX-1 Controller (Windows)" Height="1019" Width="1129" ResizeMode="NoResize"
+        Title="FTX-1 Controller (Windows)" Height="1019" Width="1129" ResizeMode="CanResize"
         WindowStartupLocation="CenterScreen">
         <!-- Width trimmed from 1180 to match the now-compact fixed-width
              content (widest row — Row 1 — needs ~1114px including outer
-             margins; 1140 leaves a little slack for window chrome). Fixed
-             via ResizeMode="NoResize" per user request 2026-09-05 — with
-             every row now Auto/fixed-width rather than stretchy, letting
-             the user resize narrower than this would just reintroduce the
-             clipping already fixed.
+             margins; 1140 leaves a little slack for window chrome).
+             ResizeMode was "NoResize" (per user request 2026-09-05) because
+             every row is Auto/fixed-width rather than stretchy, so resizing
+             narrower used to just clip content. Now the whole layout below
+             is wrapped in a single Viewbox (2026-09-07, ahead of public
+             release — other people's monitors won't all fit a fixed
+             1129x1019 window), which scales this entire fixed-shape layout
+             uniformly to whatever size the window becomes, so resizing no
+             longer clips — it shrinks/grows the whole thing proportionally
+             instead. Height/Width here are now just this layout's *natural*
+             (1:1 scale) size, not a hard limit.
              Height=920 is this component's ideal size — MainWindow.xaml.cs
              (PositionOnSecondaryMonitorIfPresent) now opens the window
              directly on the user's larger secondary monitor when one is
@@ -487,7 +493,7 @@
         </DataTemplate>
     </Window.Resources>
 
-    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Viewbox Stretch="Uniform">
         <StackPanel Margin="16">
 
             <!-- Row 1 (CLAUDE.md layout): Display (frequency + meters) |
@@ -1651,5 +1657,5 @@
             </Grid>
 
         </StackPanel>
-    </ScrollViewer>
+    </Viewbox>
 </Window>
