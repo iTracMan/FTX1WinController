@@ -238,7 +238,18 @@ on hardware (2026-09-06) that ANT TUNE now does something on the radio.
   becomes, keeping the current layout's shape and proportions intact rather
   than reflowing anything. `Height="1019" Width="1129"` on the `Window` are
   now just the layout's natural (1:1 scale) size, not a hard limit.
-  Build/tests clean; not yet tried on hardware/other monitors.
+  Hardware-confirmed (2026-09-07): resized on an external monitor, moved
+  back to the laptop's own display and resized there too — all functions
+  still work and the overall look/proportions hold. Also confirmed with the
+  laptop's Windows display scaling changed from 100% to 125%, no issues.
+- **Window title now carries a version number** (2026-09-07): "G1INU v1 —
+  build <timestamp>" (`MainWindow.xaml.cs`, `AppVersion` constant), where
+  G1INU is the user's callsign. **Bump `AppVersion` by 1 every time a build
+  goes out for the user to test** — plain hand-incremented integer, not
+  tied to the .csproj/assembly version. The build timestamp stays alongside
+  it rather than being replaced (per user request) — the version number is
+  the human-readable "which release is this," the timestamp is still the
+  at-a-glance stale-build check.
 
 ## Planned next steps (in order)
 
