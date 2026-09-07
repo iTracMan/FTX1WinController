@@ -1,4 +1,4 @@
-using System.Reflection;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -30,17 +30,23 @@ public partial class MainWindow : Window
 
         PositionOnSecondaryMonitorIfPresent();
 
-        // The running assembly's own last-write time — what's actually
-        // loaded, not a hand-maintained version number that has to be
-        // remembered on every change. Same idea as the Mac app's window
-        // title and FTX1Bridge's startup log line: a stale build should be
-        // visible at a glance, not assumed — this is what a rebuild
-        // silently not taking effect (e.g. an old process/session still
-        // running the previous build) looks like from the title bar. Kept
-        // alongside AppVersion above (not replaced by it, per user request
+        // The running exe's own last-write time — what's actually loaded,
+        // not a hand-maintained version number that has to be remembered on
+        // every change. Same idea as the Mac app's window title and
+        // FTX1Bridge's startup log line: a stale build should be visible at
+        // a glance, not assumed — this is what a rebuild silently not
+        // taking effect (e.g. an old process/session still running the
+        // previous build) looks like from the title bar. Kept alongside
+        // AppVersion above (not replaced by it, per user request
         // 2026-09-07) — the version number identifies which release this
         // is; the timestamp still catches an un-rebuilt/stale exe.
-        var location = Assembly.GetExecutingAssembly().Location;
+        //
+        // Uses Process.MainModule.FileName rather than
+        // Assembly.GetExecutingAssembly().Location: under PublishSingleFile
+        // the assembly is embedded in the exe and Location always returns
+        // "" (silently falling back to "unknown build" every time) — the
+        // process's own module path still resolves correctly either way.
+        var location = Process.GetCurrentProcess().MainModule?.FileName ?? string.Empty;
         var buildTime = System.IO.File.Exists(location)
             ? System.IO.File.GetLastWriteTime(location).ToString("yyyy-MM-dd HH:mm")
             : "unknown build";
