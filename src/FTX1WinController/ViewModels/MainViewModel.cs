@@ -37,6 +37,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private string? _currentRecordingId;
     private long _recordingStartFrequencyHz;
     private string _recordingStartMode = "";
+    private bool _monitorAutoPausedForPlayback;
 
     public MainViewModel()
     {
@@ -864,6 +865,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
                 _audio.StartMonitoring();
                 AudioMonitorOn = true;
             }
+            // A manual press always wins over whatever PLAY auto-paused —
+            // otherwise flipping Monitor mid-playback would get silently
+            // overridden once the recording finishes.
+            _monitorAutoPausedForPlayback = false;
         }
         catch (Exception ex)
         {
@@ -897,7 +902,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         SelectedRecording = recording;
         try
         {
-            _player.Play(RecordingLibrary.WavPath(recording.Id), () => IsPlaying = false);
+            // Local PLAY and Live Monitor share one speaker output — running
+            // both at once doubles up audibly. Only pause Monitor here if
+            // it's not already paused (switching tracks mid-playback calls
+            // this again while it's still off from the first track), so the
+            // "was it on before PLAY started" flag survives track switches.
+            if (_audio.IsMonitoring)
+            {
+                _audio.StopMonitoring();
+                AudioMonitorOn = false;
+                _monitorAutoPausedForPlayback = true;
+            }
+            _player.Play(RecordingLibrary.WavPath(recording.Id), OnPlaybackFinished);
             IsPlaying = true;
         }
         catch (Exception ex)
@@ -905,6 +921,29 @@ public sealed class MainViewModel : ObservableObject, IDisposable
             LastError = ex.Message;
         }
         return Task.CompletedTask;
+    }
+
+    // RecordingPlayer's PlaybackStopped fires for a natural end AND for an
+    // explicit Stop() — including the Stop() that Play() itself issues when
+    // switching tracks mid-playback, which can arrive here *after* the next
+    // track has already started. Check _player.IsPlaying rather than
+    // assuming this call means "nothing is playing now," and only resume
+    // Monitor once nothing else is queued up.
+    private void OnPlaybackFinished()
+    {
+        IsPlaying = _player.IsPlaying;
+        if (_player.IsPlaying || !_monitorAutoPausedForPlayback) return;
+
+        _monitorAutoPausedForPlayback = false;
+        try
+        {
+            _audio.StartMonitoring();
+            AudioMonitorOn = true;
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+        }
     }
 
     private Task DeleteRecordingAsync(RecordingEntryViewModel recording)

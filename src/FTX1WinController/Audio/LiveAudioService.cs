@@ -1,3 +1,4 @@
+using System.Threading;
 using NAudio.Wave;
 
 namespace FTX1WinController.Audio;
@@ -58,8 +59,26 @@ public sealed class LiveAudioService : IDisposable
         IsMonitoring = false;
         try
         {
-            waveOut?.Stop();
-            waveOut?.Dispose();
+            if (waveOut != null)
+            {
+                // WaveOutEvent.Stop() only signals its background playback
+                // thread to wind down and close the native device handle —
+                // it doesn't happen inside this call. Called on app
+                // shutdown (MainViewModel.Dispose, from Window.Closing),
+                // the process can exit and kill that thread before it gets
+                // there, leaving the USB Audio Class device open and the
+                // radio's audio still coming out of the speakers after the
+                // window has already closed. Block briefly on
+                // PlaybackStopped (which the thread raises right before
+                // exiting) so the native handle is actually released before
+                // this returns; a bounded wait so a wedged driver can't
+                // hang shutdown indefinitely.
+                using var stopped = new ManualResetEventSlim(false);
+                waveOut.PlaybackStopped += (_, _) => stopped.Set();
+                waveOut.Stop();
+                stopped.Wait(TimeSpan.FromMilliseconds(500));
+                waveOut.Dispose();
+            }
         }
         catch (Exception ex)
         {

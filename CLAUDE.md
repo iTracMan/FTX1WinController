@@ -132,13 +132,25 @@ for reference — never edit or commit anything there.
   failure surface, not a confirmed root-cause fix — if it recurs,
   `crash.log`'s contents (or continued emptiness) will say whether it's
   catchable or still native-level.
-- **Hardware-tested across three rounds so far**, all 2026-09-06. The FTX-1's
+- **Hardware-tested across five rounds so far**, all 2026-09-06/07. The FTX-1's
   USB-C cable is physically connected to this Windows laptop; `dotnet
   build`/`dotnet test` (47 tests) both pass. Round 1 (build 13:29) found the
   issues fixed above the Monitor-crash entry, plus the ANT TUNE no-response
   report. Round 2 (build 21:24) found and fixed the Monitor crash, and
   hardware-confirmed the audio features. Round 3 fixed and hardware-confirmed
-  ANT TUNE — see "Resolved" below.
+  ANT TUNE — see "Resolved" below. Round 4 (build 2026-09-07 10:14)
+  hardware-confirmed the Tuner ON/OFF toggle (`SetAntennaTunerAsync`, the
+  same `AC` command as ANT TUNE but P3='0'/'1' — its correctness had already
+  implicitly confirmed the AC command path was fine, which is what pointed
+  at the P3 value specifically for the ANT TUNE bug), re-confirmed
+  MONITOR/RECORD/PLAY still working, confirmed the Mode grid's `UniformGrid`
+  sizing fix (all buttons uniform, no more short-row stretching), and
+  confirmed Mode selection (`SetModeAsync`, `MD` command) and Band selection
+  (`SetBandAsync`, `BS` command) both actually change the radio, not just
+  the UI. Round 5 hardware-confirmed Presets, MESSAGES, and RECORD-to-file,
+  found three bugs (Playing-on-Mac label, MONITOR/PLAY overlap, MONITOR
+  surviving app shutdown), and after the fixes below, hardware-confirmed
+  all three fixed too.
 
 ## Resolved: ANT TUNE now hardware-confirmed working
 
@@ -155,16 +167,79 @@ doesn't touch `TunerOn` — matching the Mac's split between `setTunerOn` and
 Tuner on/off toggle) and pointing `AntTuneAsync` at it instead. User confirmed
 on hardware (2026-09-06) that ANT TUNE now does something on the radio.
 
+- **Fixed from the fifth hardware test** (2026-09-07): Presets, MESSAGES
+  record/playback, and RECORD-to-file all hardware-confirmed working with no
+  issues. Three bugs found and fixed:
+  1. The PLAY popup's "Playing on Mac" label (`MainWindow.xaml`, the PLAY
+     LIST popover) — same leftover-bridge-label category as the earlier
+     "BRIDGE (MAC)" fix — reworded to just "Playing".
+  2. MONITOR and local-recording PLAY shared one capture stream into
+     separate live-vs-file paths, but nothing stopped MONITOR while a
+     recording played back, so both fed the speakers at once and overlapped
+     audibly. `MainViewModel` now tracks `_monitorAutoPausedForPlayback`:
+     `PlayRecordingAsync` pauses Monitor (if it was on) before playing and
+     flags that it did so; the flag survives switching tracks mid-playback
+     (`RecordingPlayer.Play` stops the previous track first, which fires
+     the old track's "finished" callback *after* the new one has already
+     started — `OnPlaybackFinished` checks `_player.IsPlaying` rather than
+     assuming its own call means nothing is playing, so it only resumes
+     Monitor once nothing is queued up); a manual MONITOR button press
+     during playback clears the flag so it can't override the user's
+     explicit choice once playback ends. If Monitor was already off when
+     PLAY was pressed, nothing touches it — it stays off, exactly as
+     specified.
+  3. Live Monitor kept playing through the speakers after the app had
+     fully closed. `Window.Closing` → `MainViewModel.Dispose()` →
+     `LiveAudioService.StopMonitoring()` was already wired up, but NAudio's
+     `WaveOutEvent.Stop()` only *signals* its background playback thread to
+     wind down and close the native device handle — that happens on the
+     thread's own time, not inside the `Stop()` call. On shutdown the
+     process can exit and kill that thread before it gets there, leaving
+     the USB Audio Class device open with the radio's audio still coming
+     through. `StopMonitoring` now blocks (bounded to 500ms, so a wedged
+     driver can't hang shutdown) on the `PlaybackStopped` event — which the
+     thread raises right before it actually exits — before calling
+     `Dispose()`, so the native handle is confirmed released before the
+     method returns and the process is allowed to fully exit.
+  All three hardware-confirmed fixed (2026-09-07): the label reads correctly,
+  MONITOR auto-pauses/resumes cleanly around local playback with no overlap,
+  and MONITOR no longer survives app shutdown.
+- **Round 6** (2026-09-07): the rest of the FUNC-grid controls and Scan/Split
+  all hardware-confirmed working, no issues found.
+- **Round 7** (2026-09-07): the audio input device picker (Settings) also
+  hardware-confirmed working — this was the last item on the checklist
+  below, so every planned feature has now been verified against the real
+  radio at least once.
+- **S-meter tick placement recalibrated** (2026-09-07): the app's S-meter
+  gauge (`Controls/RadioMeters.cs`, `RadioArcMeterView.SMeterTicks`) had S9
+  positioned at fraction 0.64 along the sweep — eyeballed off the Mac app's
+  own screenshot, not the FTX-1's real meter. User supplied a photo of the
+  FTX-1's actual on-screen S-meter (`M:\IMG_5825.JPG`) showing S9 landing at
+  virtual center-sweep, not off to the right. Recalibrated to two evenly-
+  spaced groups matching that photo: S1/3/5/7/9 evenly spaced from 0.08 to
+  0.50 (center), then +20/+40/+60 evenly spaced from 0.50 out to 0.98; the
+  white→blue arc color break (previously hardcoded to the old 0.64) now
+  follows the same `SMeterCenterFraction` constant. Still just label
+  *placement*, not a real raw-value calibration curve — there's still no
+  way to feed the radio a known signal strength to measure the actual
+  raw-value thresholds for each S-unit/dB-over-S9 step, unlike the power
+  meter's real hardware-measured curve just above it in the same file.
+  Hardware-confirmed (2026-09-07): user reports it's "as close as it ever
+  needs to be" against the radio's own display.
+
 ## Planned next steps (in order)
 
 1. ~~Port the CAT protocol layer from the Mac app's Swift source to C#~~ — done.
 2. ~~Wire it into real serial I/O~~ — done, see "Current status" above.
 3. ~~Build Live Monitor / RECORD using Windows audio APIs~~ — done, see above.
-4. **Hardware verification, round 2+**: work through remaining issues as the
-   user finds them. MONITOR passthrough, RECORD-to-file/PLAY, and ANT TUNE
-   are now hardware-confirmed (see "Current status" and "Resolved" above);
-   still need every other FUNC-grid control, Scan/Split, presets, and the
-   audio device picker covered against the real radio.
+4. ~~Hardware verification~~ — done, as of round 7 (2026-09-07). Every
+   planned feature (MONITOR passthrough, RECORD-to-file/PLAY, ANT TUNE,
+   Tuner ON/OFF, Mode grid sizing, Mode selection, Band selection, Presets,
+   MESSAGES, the full FUNC-grid, Scan/Split, and the audio device picker) is
+   hardware-confirmed working (see "Current status" and "Resolved" above).
+   Future hardware issues the user finds should still be worked through as
+   they come up, but there's no longer an open checklist of untested
+   features.
 
 ## Hardware-confirmed CAT quirks (from the Mac app, NOT reliably in the manual)
 

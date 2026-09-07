@@ -1595,7 +1595,7 @@
                                                 </TextBlock>
                                                 <StackPanel Orientation="Horizontal">
                                                     <Button Content="Stop" Command="{Binding StopPlaybackCommand}" Padding="8,4" Margin="0,0,4,0" />
-                                                    <TextBlock Text="Playing on Mac" Foreground="{StaticResource AmberBrush}" VerticalAlignment="Center" Margin="8,0,0,0">
+                                                    <TextBlock Text="Playing" Foreground="{StaticResource AmberBrush}" VerticalAlignment="Center" Margin="8,0,0,0">
                                                         <TextBlock.Style>
                                                             <Style TargetType="TextBlock">
                                                                 <Setter Property="Visibility" Value="Collapsed" />

@@ -41,23 +41,32 @@ public sealed class RadioArcMeterView : FrameworkElement
     private const double TopY = 5;
     private const double BowBottomY = 22;
 
-    // S1..S9 evenly spaced, then +20/+40/+60 compressed into the remaining
-    // width — matches the reference screenshot's proportions closely
-    // enough without an actual calibration curve to work from. The "which
-    // meter is this" identity (S / P) is a dedicated left-margin label
-    // (see OnRender below), not one of these ticks — folding it into the
-    // tick row made it both too small to read and easy to mistake for a
-    // value (confirmed 2026-09-04: "S is a tad small and the P is
-    // unreadable").
+    // S1..S9 evenly spaced from the sweep's left edge to dead center, then
+    // +20/+40/+60 evenly spaced from center out to the right edge — matched
+    // (2026-09-07) against a real photo of the FTX-1's own S-meter display
+    // (M:\IMG_5825.JPG), which shows S9 landing at virtual center-sweep.
+    // The earlier version put S9 at 0.64, eyeballed off the Mac app's own
+    // screenshot rather than the FTX-1's real meter, and was visibly wrong
+    // on hardware (confirmed 2026-09-07: "9 on the radio is at virtually
+    // centre sweep... whereas on the app centre sweep is 7"). Still just
+    // matching label PLACEMENT, not a real raw-value calibration curve —
+    // there's no way to feed the radio a signal of known strength to
+    // measure the actual S1-S9/dB-over-S9 raw thresholds, unlike the power
+    // meter below. The "which meter is this" identity (S / P) is a
+    // dedicated left-margin label (see OnRender below), not one of these
+    // ticks — folding it into the tick row made it both too small to read
+    // and easy to mistake for a value (confirmed 2026-09-04: "S is a tad
+    // small and the P is unreadable").
+    private const double SMeterCenterFraction = 0.50;
     private static readonly ArcMeterTick[] SMeterTicks =
     {
-        new(0.10, "1"),
-        new(0.24, "3"),
-        new(0.38, "5"),
-        new(0.52, "7"),
-        new(0.64, "9"),
-        new(0.77, "+20"),
-        new(0.88, "+40"),
+        new(0.08, "1"),
+        new(0.185, "3"),
+        new(0.29, "5"),
+        new(0.395, "7"),
+        new(SMeterCenterFraction, "9"),
+        new(0.66, "+20"),
+        new(0.82, "+40"),
         new(0.98, "+60"),
     };
 
@@ -109,9 +118,9 @@ public sealed class RadioArcMeterView : FrameworkElement
         if (width <= 0 || ActualHeight <= 0) return;
 
         var ticks = Kind == ArcMeterKind.SMeter ? SMeterTicks : PowerTicks;
-        // S-meter's arc goes white -> blue past S9 (~0.64); Power Output
-        // stays a single amber arc throughout.
-        double? colorBreak = Kind == ArcMeterKind.SMeter ? 0.64 : null;
+        // S-meter's arc goes white -> blue past S9; Power Output stays a
+        // single amber arc throughout.
+        double? colorBreak = Kind == ArcMeterKind.SMeter ? SMeterCenterFraction : null;
         var primaryColor = Kind == ArcMeterKind.SMeter ? WhiteArc : Amber;
 
         if (colorBreak is double breakF)
