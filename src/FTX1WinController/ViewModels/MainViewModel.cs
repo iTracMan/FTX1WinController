@@ -373,10 +373,10 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         SubDialTarget.Sql => Squelch,
     };
 
-    /// Same hardware-confirmed mode-family rule as RadioController's own
-    /// `ModeShowsSquelchNotRf`: FM/FM-N/C4FM-DN/D-FM/D-FM-N/C4FM-VW show
-    /// SQL, every other mode shows RF.
-    private static readonly HashSet<char> SquelchModeCodes = new() { '4', 'B', 'H', 'A', 'F', 'I' };
+    /// Same rule as RadioController's own `ModeShowsSquelchNotRf`:
+    /// FM/FM-N/C4FM-DN/D-FM(DATA-FM)/D-FM-N/C4FM-VW/AM/AM-N show SQL, every
+    /// other mode shows RF — the radio's default [AF/RF/SQL]=AUTO behavior.
+    private static readonly HashSet<char> SquelchModeCodes = new() { '4', 'B', 'H', 'A', 'F', 'I', '5', 'D' };
     public bool ModeShowsSquelchNotRF => SquelchModeCodes.Contains(_modeCode);
 
     private bool IsSubDialTargetValid(SubDialTarget target) => target switch

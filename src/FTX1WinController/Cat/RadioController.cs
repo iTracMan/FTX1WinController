@@ -182,11 +182,15 @@ public sealed partial class RadioController : ObservableObject
     /// codes per RadioMode.CatCode: "7"=CW-L, "3"=CW-U.
     public bool KeyerAvailable => ModeCode is '7' or '3';
 
-    /// FM, FM-N, C4FM, D-FM, D-FM-N show SQL instead of RF on both the
-    /// meter and the MAIN AF/RF/SQL knob — confirmed on hardware. "I"
-    /// (C4FM-VW) is grouped with the C4FM family (confirmed); "7" (CW-L) is
-    /// grouped with CW-U (RF) for the same reason — neither independently confirmed.
-    private static readonly HashSet<char> SquelchModeCodes = new() { '4', 'B', 'H', 'A', 'F', 'I' };
+    /// Radio's default [AF/RF/SQL]=AUTO menu behavior: FM, FM-N, DATA-FM
+    /// (D-FM/'A' — the manual's raw-mode-table name for the same code the
+    /// app's mode button labels "D-FM"), D-FM-N, C4FM, and AM/AM-N show SQL
+    /// instead of RF on both the meter and the MAIN AF/RF/SQL knob — SQL
+    /// codes confirmed by the radio's documented AUTO menu logic; AM/AM-N
+    /// were missing here entirely until this fix. "I" (C4FM-VW) is grouped
+    /// with the C4FM family (confirmed); "7" (CW-L) is grouped with CW-U
+    /// (RF) for the same reason — neither independently confirmed.
+    private static readonly HashSet<char> SquelchModeCodes = new() { '4', 'B', 'H', 'A', 'F', 'I', '5', 'D' };
 
     public bool ModeShowsSquelchNotRf => SquelchModeCodes.Contains(ModeCode);
 

@@ -250,6 +250,15 @@ on hardware (2026-09-06) that ANT TUNE now does something on the radio.
   it rather than being replaced (per user request) — the version number is
   the human-readable "which release is this," the timestamp is still the
   at-a-glance stale-build check.
+- **AM/AM-N added to the SQL-not-RF mode group** (2026-09-08): the radio's
+  default [AF/RF/SQL]=AUTO menu behavior shows SQL instead of RF (on both
+  the meter and the MAIN AF/RF/SQL knob) for AM/AM-N as well as the
+  FM/D-FM/C4FM family already handled — `SquelchModeCodes` in both
+  `RadioController.ModeShowsSquelchNotRf` and `MainViewModel`'s own copy
+  (`ModeShowsSquelchNotRF`) were missing AM ('5') and AM-N ('D') entirely.
+  Both sets updated in lockstep, same as the existing duplication between
+  the two files. Hardware-confirmed (2026-09-08): AM mode now correctly
+  shows SQL active.
 
 ## Planned next steps (in order)
 
