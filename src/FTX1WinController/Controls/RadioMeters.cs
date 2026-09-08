@@ -44,7 +44,7 @@ public sealed class RadioArcMeterView : FrameworkElement
     // S1..S9 evenly spaced from the sweep's left edge to dead center, then
     // +20/+40/+60 evenly spaced from center out to the right edge — matched
     // (2026-09-07) against a real photo of the FTX-1's own S-meter display
-    // (M:\IMG_5825.JPG), which shows S9 landing at virtual center-sweep.
+    // (a user-supplied reference photo), which shows S9 landing at virtual center-sweep.
     // The earlier version put S9 at 0.64, eyeballed off the Mac app's own
     // screenshot rather than the FTX-1's real meter, and was visibly wrong
     // on hardware (confirmed 2026-09-07: "9 on the radio is at virtually

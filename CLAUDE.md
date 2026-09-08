@@ -19,8 +19,8 @@ architecture, but currently the least complete functionally:
 2. **FTX1ControllerWin** (Windows, WPF) — a bridge client. Does not talk to the
    radio at all; sends text commands (`GET FREQ`, `SET FREQ <hz>`, ...) over TCP
    port 5150 to `FTX1Bridge`, a headless daemon running as a LaunchAgent on the
-   Mac that owns the actual serial connection. Lives at `M:\FTX1ControllerWin`
-   (SMB share back to the Mac). **This app's UI (`MainWindow.xaml`, `Controls/`,
+   Mac that owns the actual serial connection. Lives on the Mac, synced to this
+   machine over a mapped network drive. **This app's UI (`MainWindow.xaml`, `Controls/`,
    `Converters/`, `Models/`, `Settings/`, `ViewModels/`) was copied wholesale into
    this repo as the starting point** — same look/behavior, but it currently still
    talks to a bridge, not the radio.
@@ -29,14 +29,15 @@ architecture, but currently the least complete functionally:
    `ViewModels/MainViewModel.cs` with direct serial CAT I/O, porting the protocol
    logic from the Mac app (#1) instead of going through #2's bridge.
 
-The Mac app's source is cloned **read-only** at `C:\Users\maswe\FTX1Controller-MacRef`
-for reference — never edit or commit anything there.
+The Mac app's source is cloned **read-only** at `..\FTX1Controller-MacRef` (a sibling
+directory to this repo) for reference — never edit or commit anything there.
 
 ## Current status
 
 - Project scaffolded via `dotnet new wpf` (net8.0-windows), building cleanly.
-- Full UI/ViewModel/Model layer copied from `M:\FTX1ControllerWin` and
-  namespace-renamed to `FTX1WinController`. The app still assumes a bridge
+- Full UI/ViewModel/Model layer copied from the Mac's `FTX1ControllerWin` bridge-client
+  repo (synced via mapped network drive) and namespace-renamed to `FTX1WinController`.
+  The app still assumes a bridge
   connection (`Bridge/BridgeClient.cs`, `ViewModels/MainViewModel.cs`) — that
   code is untouched so far.
 - **The CAT protocol layer has been ported** into `src/FTX1WinController/Cat/`:
@@ -214,7 +215,7 @@ on hardware (2026-09-06) that ANT TUNE now does something on the radio.
   gauge (`Controls/RadioMeters.cs`, `RadioArcMeterView.SMeterTicks`) had S9
   positioned at fraction 0.64 along the sweep — eyeballed off the Mac app's
   own screenshot, not the FTX-1's real meter. User supplied a photo of the
-  FTX-1's actual on-screen S-meter (`M:\IMG_5825.JPG`) showing S9 landing at
+  FTX-1's actual on-screen S-meter (a user-supplied reference photo) showing S9 landing at
   virtual center-sweep, not off to the right. Recalibrated to two evenly-
   spaced groups matching that photo: S1/3/5/7/9 evenly spaced from 0.08 to
   0.50 (center), then +20/+40/+60 evenly spaced from 0.50 out to 0.98; the
@@ -375,3 +376,11 @@ GitHub Release (moving its contents into the release notes instead).
   path/behavior, while `dotnet publish -c Release` still produces the same
   win-x64 self-contained single-file output v1 shipped with (verified:
   `bin\Release\net8.0-windows\win-x64\publish\` unchanged).
+- **Redacted personal paths from the now-public repo** (2026-09-08): a full
+  pass found no leaked credentials (current tree and full git history both
+  checked — none), but `CLAUDE.md` and `Controls/RadioMeters.cs` referenced
+  the developer's Windows username (`C:\Users\...\FTX1Controller-MacRef`)
+  and mapped SMB drive letter (`M:\...`) in a few spots. Reworded to a
+  relative sibling-directory path for the Mac reference repo (still
+  navigable, no username) and generic descriptions for the SMB share and a
+  one-off reference photo path.
