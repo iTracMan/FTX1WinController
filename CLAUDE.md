@@ -353,34 +353,20 @@ Code signing/SmartScreen still unresolved — the unsigned exe will likely
 trigger a SmartScreen warning on first run for end users; MIT license
 still to be added to the repo.
 
-### Changes merged to main since v1 (accumulating toward v2)
+**v2 released** (2026-09-08): same self-contained/single-file build process
+as v1 (`dotnet publish src/FTX1WinController/FTX1WinController.csproj -c
+Release`), zipped as `FTX1WinController-v2.zip` (exe + the same 5 native
+WPF interop DLLs + `.pdb`, flat at the zip root, no subfolder — matching
+v1's layout). Carried the four changes listed in the now-cleared "since v1"
+section below: AM/AM-N added to the SQL-not-RF mode group, MONITOR
+respecting SQL, the Debug-build self-contained/win-x64 scoping fix, and the
+personal-path redaction from `CLAUDE.md`/`RadioMeters.cs`. Confirmed live
+as the "Latest" release on GitHub.
+
+### Changes merged to main since v2 (accumulating toward v3)
 
 Keep this list updated as commits land — add an entry per merged
-fix/feature, and clear the list back to empty right after cutting the v2
+fix/feature, and clear the list back to empty right after cutting the v3
 GitHub Release (moving its contents into the release notes instead).
 
-- **AM/AM-N added to the SQL-not-RF mode group** (2026-09-08, commit
-  `95ced2d`) — see "Current status" above for detail. Hardware-confirmed.
-- **MONITOR now respects SQL** (2026-09-08) — see "Current status" above
-  for detail. Hardware-confirmed, including the tuned `MonitorSquelchTrim`
-  value.
-- **Debug builds no longer self-contained/win-x64** (2026-09-08):
-  `RuntimeIdentifier`/`SelfContained`/`PublishSingleFile` in
-  `FTX1WinController.csproj` were in the top-level `<PropertyGroup>`, so
-  they applied to every build, not just Release publish — Debug builds
-  started landing in `bin\Debug\net8.0-windows\win-x64\` (RID-suffixed
-  path) instead of the old `bin\Debug\net8.0-windows\`, and became
-  self-contained (bundling the full .NET runtime) along the way. Moved
-  those three properties into a `Condition="'$(Configuration)'=='Release'"`
-  `<PropertyGroup>` so Debug goes back to the old plain, framework-dependent
-  path/behavior, while `dotnet publish -c Release` still produces the same
-  win-x64 self-contained single-file output v1 shipped with (verified:
-  `bin\Release\net8.0-windows\win-x64\publish\` unchanged).
-- **Redacted personal paths from the now-public repo** (2026-09-08): a full
-  pass found no leaked credentials (current tree and full git history both
-  checked — none), but `CLAUDE.md` and `Controls/RadioMeters.cs` referenced
-  the developer's Windows username (`C:\Users\...\FTX1Controller-MacRef`)
-  and mapped SMB drive letter (`M:\...`) in a few spots. Reworded to a
-  relative sibling-directory path for the Mac reference repo (still
-  navigable, no username) and generic descriptions for the SMB share and a
-  one-off reference photo path.
+(empty)
