@@ -370,51 +370,27 @@ respecting SQL, the Debug-build self-contained/win-x64 scoping fix, and the
 personal-path redaction from `CLAUDE.md`/`RadioMeters.cs`. Confirmed live
 as the "Latest" release on GitHub.
 
-### Changes merged to main since v2 (accumulating toward v3)
+**v3 released** (2026-09-08): same self-contained/single-file build process
+as v1/v2 (`dotnet publish src/FTX1WinController/FTX1WinController.csproj -c
+Release`), zipped as `FTX1WinController-v3.zip` (exe + the same 5 native
+WPF interop DLLs + `.pdb`, flat at the zip root — matching v1/v2's layout).
+Carried the three fixes listed in the now-cleared "since v2" section below,
+all hardware-confirmed before the cut: the audio-capture-race root-cause
+fix for the Live Monitor crash, the poll-timer re-entrancy guard, and
+culture-invariant frequency entry/display. Also re-confirmed on hardware
+(no code change) that ANT TUNE remains fixed — the external review's §1.5
+theory didn't apply, see "Known/deferred items" below. This is also the
+first release whose GitHub Release description carries the SmartScreen
+warning note (per the convention documented above, added after v2 had
+already been cut).
+
+### Changes merged to main since v3 (accumulating toward v4)
 
 Keep this list updated as commits land — add an entry per merged
-fix/feature, and clear the list back to empty right after cutting the v3
+fix/feature, and clear the list back to empty right after cutting the v4
 GitHub Release (moving its contents into the release notes instead).
 
-- **Fixed the actual root cause of the Live Monitor crash** (2026-09-08),
-  per an external code review (§1.2). The defensive hardening added a few
-  sessions back (state-before-`Dispose()` ordering, catch+log around NAudio
-  teardown, `crash.log`) made the crash survivable and diagnosable, but
-  never addressed the underlying bug: `LiveAudioService.OnDataAvailable`
-  (NAudio's capture thread) read `_monitorBuffer`/`_recordingWriter` via a
-  bare `?.` at the same time `StopMonitoring`/`StopRecording` (UI thread)
-  were nulling and disposing those same fields — a plain data race, with a
-  real risk of `ObjectDisposedException` on `_recordingWriter` (a
-  `WaveFileWriter`) if the capture thread's null-check passed just before
-  the UI thread's `Dispose()` landed. Fixed with a `_bufferLock` held across
-  the entire capture callback and across each field's null-out in
-  `StopMonitoring`/`StopRecording` (the `Dispose()`/`Flush()` calls
-  themselves stay outside the lock so slow disk I/O can't block the capture
-  thread). `StartMonitoring`/`StartRecording` now also assign through the
-  same lock. Added a matching catch+log around `StopRecording`'s
-  `Flush()`/`Dispose()`, mirroring the one already on `StopMonitoring`, for
-  the same reason (a wedged USB Audio Class teardown shouldn't be able to
-  take the process down from either stop path). **Hardware-confirmed
-  (2026-09-08):** repeated Monitor ON/OFF cycling produced no crash — the
-  race fix is holding up where the earlier defensive hardening alone
-  wasn't the actual fix.
-- **Added a poll-timer re-entrancy guard** (2026-09-08), per code review
-  §1.1. `DispatcherTimer.Tick`'s `async void` handler wasn't serialized —
-  the every-8th-tick heavy path (a dozen-plus sequential CAT round-trips)
-  could routinely outlast the 250ms interval, letting overlapping
-  `OnPollTickAsync` runs pile onto `CatConnection`'s FIFO queue unbounded.
-  Added a `_pollInProgress` flag (UI-thread-only, no locking needed) that
-  skips a tick if the previous one hasn't finished. **Hardware-confirmed
-  (2026-09-08):** no lag or meter stutter noticed during general use.
-- **Frequency entry/display made culture-invariant** (2026-09-08), per code
-  review §1.3. `SetFrequencyAsync`/`SetSubFrequencyAsync` parsed
-  `DirectEntryText`/`SubFrequencyEntryText` with `double.TryParse` under the
-  machine's current culture — on a comma-decimal locale, `14.250` either
-  fails to parse or parses as `14250`. Both now parse with
-  `NumberStyles.Float`/`CultureInfo.InvariantCulture`; `FrequencyDisplay`/
-  `SubFrequencyDisplay`'s `ToString("F6")` got the same treatment so entry
-  and display can't disagree. **Hardware-confirmed (2026-09-08):** direct
-  frequency entry with a decimal point works correctly.
+(empty)
 
 ## Known/deferred items from the 2026-09-08 external code review
 
