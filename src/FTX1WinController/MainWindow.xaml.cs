@@ -18,7 +18,7 @@ public partial class MainWindow : Window
     // integer, not tied to the .csproj/assembly version, since it only
     // needs to track "which build did the user last test," same purpose
     // the build timestamp below already served.
-    private const int AppVersion = 1;
+    private const int AppVersion = 2;
 
     private readonly MainViewModel _viewModel = new();
 
