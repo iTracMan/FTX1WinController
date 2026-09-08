@@ -15,6 +15,22 @@ public sealed class AppSettings
     public string? Cat1Port { get; set; }
     public string? Cat2Port { get; set; }
     public string? AudioInputDeviceName { get; set; }
+
+    /// SM (RF signal strength) and SQ (squelch threshold) are both 0-255
+    /// CAT readings but not the same physical quantity — most Yaesu
+    /// FM/AM squelch circuits gate on audio-noise energy, not raw RF
+    /// signal strength, and the FTX-1 exposes no CAT command for the
+    /// noise detector's actual state. So MONITOR's SM-vs-SQ approximation
+    /// (MainViewModel.RefreshMetersAsync) can only ever be a rough match
+    /// for the real speaker's squelch point, not an exact one — this trim
+    /// (subtracted from SQ before the comparison) exists to be tuned on
+    /// the bench against the real radio rather than guessed from source
+    /// alone. Default of 1 is a starting point inferred from one hardware
+    /// report (2026-09-08): MONITOR was muting as soon as SQL left 0,
+    /// while the radio's own speaker didn't actually silence until SQL
+    /// was raised to ~2 — still needs further on-radio confirmation/tuning.
+    public int MonitorSquelchTrim { get; set; } = 1;
+
     public List<PresetData> Presets { get; set; } = new();
 
     private static string FilePath => Path.Combine(

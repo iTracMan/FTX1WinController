@@ -31,6 +31,13 @@ public sealed class LiveAudioService : IDisposable
     public bool IsMonitoring { get; private set; }
     public bool IsRecording { get; private set; }
 
+    /// Set by MainViewModel from its existing SMeter/Squelch poll data — the
+    /// radio's own speaker is silenced by SQL, but this app's local capture
+    /// is a raw USB Audio Class passthrough with no idea of squelch state on
+    /// its own, so MONITOR needs to be told separately. Recording is
+    /// deliberately unaffected — RECORD-to-file should keep everything.
+    public bool MonitorMuted { get; set; }
+
     public static IReadOnlyList<(int Index, string Name)> GetInputDevices()
     {
         var devices = new List<(int, string)>();
@@ -150,7 +157,7 @@ public sealed class LiveAudioService : IDisposable
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
-        _monitorBuffer?.AddSamples(e.Buffer, 0, e.BytesRecorded);
+        if (!MonitorMuted) _monitorBuffer?.AddSamples(e.Buffer, 0, e.BytesRecorded);
         _recordingWriter?.Write(e.Buffer, 0, e.BytesRecorded);
     }
 

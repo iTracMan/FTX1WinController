@@ -43,6 +43,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         _selectedCat1Port = _settings.Cat1Port;
         _selectedCat2Port = _settings.Cat2Port;
+        _monitorSquelchTrim = _settings.MonitorSquelchTrim;
 
         // Mirror the two pieces of RadioController state this ViewModel
         // doesn't otherwise poll for on every change (LastError/
@@ -502,6 +503,24 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     {
         AvailableAudioInputDevices.Clear();
         foreach (var (_, name) in LiveAudioService.GetInputDevices()) AvailableAudioInputDevices.Add(name);
+    }
+
+    // MARK: - MONITOR squelch trim — see AppSettings.MonitorSquelchTrim for
+    // why this exists: SM (RF signal strength) and SQ (squelch threshold)
+    // aren't the same physical quantity, so the SM-vs-SQ approximation used
+    // to gate MONITOR (RefreshMetersAsync below) needs a bench-tunable
+    // fudge factor rather than a fixed guess.
+    private int _monitorSquelchTrim;
+    public int MonitorSquelchTrim
+    {
+        get => _monitorSquelchTrim;
+        set
+        {
+            var clamped = Math.Clamp(value, -20, 60);
+            if (!SetProperty(ref _monitorSquelchTrim, clamped)) return;
+            _settings.MonitorSquelchTrim = clamped;
+            _settings.Save();
+        }
     }
 
     // MARK: - Scan/Split
@@ -1303,6 +1322,18 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private async Task RefreshMetersAsync()
     {
         if (await _radio.RefreshMeterAsync(MeterKind.SMeterMain) is { } s) SMeterValue = s;
+
+        // The radio's own speaker mutes below the SQL threshold, but
+        // MONITOR is a raw USB audio passthrough with no built-in idea of
+        // squelch state (see LiveAudioService.MonitorMuted). There's no
+        // dedicated "squelch open" CAT command on the FTX-1, and SM (RF
+        // signal strength) isn't actually the quantity the real squelch
+        // circuit gates on (FM/AM squelch is normally audio-noise-derived,
+        // not RF-strength-derived) — so this comparison is only ever an
+        // approximation of the real crossover point. MonitorSquelchTrim
+        // exists to correct for that gap empirically (see AppSettings).
+        _audio.MonitorMuted = SMeterValue < Squelch - MonitorSquelchTrim;
+
         if (IsTransmitting)
         {
             if (await _radio.RefreshMeterAsync(MeterKind.PowerOutput) is { } po) PowerOutputValue = po;

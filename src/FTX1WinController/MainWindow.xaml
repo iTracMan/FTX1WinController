@@ -676,6 +676,13 @@
                                     </StackPanel>
                                     <TextBlock Text="(the FTX-1's own USB audio interface, used by MONITOR/RECORD)" Foreground="{StaticResource LabelSecondaryBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10" />
                                     <Button Content="Refresh Audio Devices" Command="{Binding RefreshAudioDevicesCommand}" HorizontalAlignment="Left" />
+
+                                    <TextBlock Text="MONITOR SQUELCH TRIM" Foreground="{StaticResource LabelSecondaryBrush}" FontSize="11" FontWeight="SemiBold" Margin="0,16,0,10" />
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                        <TextBlock Text="Trim:" VerticalAlignment="Center" Foreground="White" Width="70" />
+                                        <TextBox Text="{Binding MonitorSquelchTrim, UpdateSourceTrigger=PropertyChanged}" Width="70" />
+                                    </StackPanel>
+                                    <TextBlock Text="(raise if MONITOR silences before the radio's own speaker does; lower if MONITOR stays open too long)" Foreground="{StaticResource LabelSecondaryBrush}" FontSize="11" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Border>
                         </Popup>

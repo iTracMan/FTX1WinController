@@ -259,6 +259,26 @@ on hardware (2026-09-06) that ANT TUNE now does something on the radio.
   Both sets updated in lockstep, same as the existing duplication between
   the two files. Hardware-confirmed (2026-09-08): AM mode now correctly
   shows SQL active.
+- **MONITOR now respects SQL** (2026-09-08): the radio's own speaker was
+  correctly silenced by squelch, but MONITOR (`LiveAudioService`) is a raw
+  USB Audio Class passthrough with no built-in idea of squelch state, so it
+  kept passing band noise to the PC speakers regardless. The FTX-1 exposes
+  no CAT command for squelch open/closed state, so this is an
+  approximation: `MainViewModel.RefreshMetersAsync` compares the
+  already-polled `SMeterValue` (RF signal strength, `RM1`) against
+  `Squelch` (the `SQ` threshold) and sets `LiveAudioService.MonitorMuted`
+  accordingly — RECORD-to-file is deliberately unaffected, so recordings
+  stay a complete capture regardless of squelch. Because SM (RF signal
+  strength) and SQ aren't actually the same physical quantity — most Yaesu
+  FM/AM squelch is audio-noise-derived, not RF-strength-derived — the raw
+  comparison didn't line up with the radio's real crossover point on the
+  first hardware test (MONITOR muted at SQL≈1, the radio's speaker didn't
+  silence until SQL≈2). Added a user-tunable `MonitorSquelchTrim`
+  (`AppSettings`, exposed in the connection Settings popup as "MONITOR
+  SQUELCH TRIM," subtracted from `Squelch` before the comparison) so the
+  gap can be corrected on the bench instead of guessed from source.
+  Hardware-confirmed (2026-09-08) once the trim was adjusted: MONITOR now
+  silences at the same SQL point as the radio's own speaker.
 
 ## Planned next steps (in order)
 
@@ -340,6 +360,9 @@ GitHub Release (moving its contents into the release notes instead).
 
 - **AM/AM-N added to the SQL-not-RF mode group** (2026-09-08, commit
   `95ced2d`) — see "Current status" above for detail. Hardware-confirmed.
+- **MONITOR now respects SQL** (2026-09-08) — see "Current status" above
+  for detail. Hardware-confirmed, including the tuned `MonitorSquelchTrim`
+  value.
 - **Debug builds no longer self-contained/win-x64** (2026-09-08):
   `RuntimeIdentifier`/`SelfContained`/`PublishSingleFile` in
   `FTX1WinController.csproj` were in the top-level `<PropertyGroup>`, so
