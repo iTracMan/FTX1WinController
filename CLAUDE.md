@@ -376,4 +376,75 @@ Keep this list updated as commits land — add an entry per merged
 fix/feature, and clear the list back to empty right after cutting the v3
 GitHub Release (moving its contents into the release notes instead).
 
-(empty)
+- **Fixed the actual root cause of the Live Monitor crash** (2026-09-08),
+  per an external code review (§1.2). The defensive hardening added a few
+  sessions back (state-before-`Dispose()` ordering, catch+log around NAudio
+  teardown, `crash.log`) made the crash survivable and diagnosable, but
+  never addressed the underlying bug: `LiveAudioService.OnDataAvailable`
+  (NAudio's capture thread) read `_monitorBuffer`/`_recordingWriter` via a
+  bare `?.` at the same time `StopMonitoring`/`StopRecording` (UI thread)
+  were nulling and disposing those same fields — a plain data race, with a
+  real risk of `ObjectDisposedException` on `_recordingWriter` (a
+  `WaveFileWriter`) if the capture thread's null-check passed just before
+  the UI thread's `Dispose()` landed. Fixed with a `_bufferLock` held across
+  the entire capture callback and across each field's null-out in
+  `StopMonitoring`/`StopRecording` (the `Dispose()`/`Flush()` calls
+  themselves stay outside the lock so slow disk I/O can't block the capture
+  thread). `StartMonitoring`/`StartRecording` now also assign through the
+  same lock. Added a matching catch+log around `StopRecording`'s
+  `Flush()`/`Dispose()`, mirroring the one already on `StopMonitoring`, for
+  the same reason (a wedged USB Audio Class teardown shouldn't be able to
+  take the process down from either stop path). Not yet hardware-retested —
+  next hardware round should specifically try to reproduce the original
+  crash pattern (rapid Monitor ON/OFF, and Monitor + RECORD-to-file running
+  together) to confirm the race is what was actually happening.
+- **Added a poll-timer re-entrancy guard** (2026-09-08), per code review
+  §1.1. `DispatcherTimer.Tick`'s `async void` handler wasn't serialized —
+  the every-8th-tick heavy path (a dozen-plus sequential CAT round-trips)
+  could routinely outlast the 250ms interval, letting overlapping
+  `OnPollTickAsync` runs pile onto `CatConnection`'s FIFO queue unbounded.
+  Added a `_pollInProgress` flag (UI-thread-only, no locking needed) that
+  skips a tick if the previous one hasn't finished.
+- **Frequency entry/display made culture-invariant** (2026-09-08), per code
+  review §1.3. `SetFrequencyAsync`/`SetSubFrequencyAsync` parsed
+  `DirectEntryText`/`SubFrequencyEntryText` with `double.TryParse` under the
+  machine's current culture — on a comma-decimal locale, `14.250` either
+  fails to parse or parses as `14250`. Both now parse with
+  `NumberStyles.Float`/`CultureInfo.InvariantCulture`; `FrequencyDisplay`/
+  `SubFrequencyDisplay`'s `ToString("F6")` got the same treatment so entry
+  and display can't disagree.
+
+## Known/deferred items from the 2026-09-08 external code review
+
+A downloader sent a full static code review (no hardware access) on
+2026-09-08. §1.1, §1.2, and §1.3 were fixed — see the changelog above (or
+release notes, once cut into v3). The rest, by design, are left open:
+
+- **§1.5 (ANT TUNE root cause) — theory doesn't apply, already resolved.**
+  The review's suspect code (`SetAntennaTunerAsync('2')`) is the *pre-fix*
+  call — it was replaced by `StartAntennaTuningAsync()` (hardcoded P3='3')
+  in commit `d66151a`, hardware-confirmed working 2026-09-06 (see
+  "Resolved: ANT TUNE now hardware-confirmed working" above). The review
+  appears to have been run against a stale snapshot predating that fix, not
+  current `main`. No action taken.
+- **§1.4 (stale reply mis-attribution after a CAT timeout)** — plausible
+  and self-limiting per the review's own analysis (every parser validates
+  frame prefix/length/terminator, so a mismatched frame is normally just
+  dropped); real risk is narrow, limited to commands sharing a prefix
+  (e.g. `SS0x` scope items, `LM0`/`LM1`). Deferred — worth a `CatConnection`
+  hardening pass (clear `_buffer` on timeout, and/or validate the in-flight
+  command's expected prefix before completing its waiter) if it's ever
+  actually observed on hardware.
+- **§2.1 (unopened CAT-2 transport can leak on failed/partial connect)** —
+  low impact (an unopened `SerialPort`), deferred.
+- **§2.2 (`ToggleRecordAsync`'s revert-via-second-toggle races the async
+  toggle)** — converges in practice per the review; deferred in favor of an
+  explicit `SetSdRecordingAsync(false)` if it's ever revisited.
+- **§2.3 (`WindowsSerialTransport.Write` after `Close()` throws
+  `ObjectDisposedException` instead of the guarded
+  `InvalidOperationException`)** — currently unreachable (`CatConnection`
+  guards via its own `_transport` null-check), deferred.
+- **§3 (design/maintainability: duplicated mode-code sets between
+  `MainViewModel` and `RadioController`, `ModeShowsSquelchNotRf` casing
+  mismatch, meter-poll-rate question)** — all fair cleanup, no functional
+  risk; deferred.

@@ -26,6 +26,15 @@ public sealed class LiveAudioService : IDisposable
     private WaveFileWriter? _recordingWriter;
     private DateTime _recordingStartedUtc;
 
+    // OnDataAvailable runs on NAudio's own capture thread, while every Start/Stop
+    // method runs on the UI thread — without this, the capture thread could read
+    // _recordingWriter (or _monitorBuffer) after the UI thread had already
+    // disposed it (or mid-assignment), throwing ObjectDisposedException from a
+    // thread nothing was catching on. All reads and writes of those two fields
+    // go through this lock; Dispose() calls themselves happen after releasing it
+    // so a slow WAV flush to disk doesn't block the capture thread.
+    private readonly object _bufferLock = new();
+
     public string? SelectedInputDeviceName { get; set; }
 
     public bool IsMonitoring { get; private set; }
@@ -50,9 +59,10 @@ public sealed class LiveAudioService : IDisposable
     {
         if (IsMonitoring) return;
         EnsureCaptureStarted();
-        _monitorBuffer = new BufferedWaveProvider(_waveIn!.WaveFormat) { DiscardOnBufferOverflow = true };
+        var buffer = new BufferedWaveProvider(_waveIn!.WaveFormat) { DiscardOnBufferOverflow = true };
+        lock (_bufferLock) { _monitorBuffer = buffer; }
         _waveOut = new WaveOutEvent();
-        _waveOut.Init(_monitorBuffer);
+        _waveOut.Init(buffer);
         _waveOut.Play();
         IsMonitoring = true;
     }
@@ -62,7 +72,7 @@ public sealed class LiveAudioService : IDisposable
         if (!IsMonitoring) return;
         var waveOut = _waveOut;
         _waveOut = null;
-        _monitorBuffer = null;
+        lock (_bufferLock) { _monitorBuffer = null; }
         IsMonitoring = false;
         try
         {
@@ -103,7 +113,8 @@ public sealed class LiveAudioService : IDisposable
     {
         if (IsRecording) return;
         EnsureCaptureStarted();
-        _recordingWriter = new WaveFileWriter(filePath, _waveIn!.WaveFormat);
+        var writer = new WaveFileWriter(filePath, _waveIn!.WaveFormat);
+        lock (_bufferLock) { _recordingWriter = writer; }
         _recordingStartedUtc = DateTime.UtcNow;
         IsRecording = true;
     }
@@ -112,10 +123,24 @@ public sealed class LiveAudioService : IDisposable
     {
         if (!IsRecording) return TimeSpan.Zero;
         var duration = DateTime.UtcNow - _recordingStartedUtc;
-        _recordingWriter?.Flush();
-        _recordingWriter?.Dispose();
-        _recordingWriter = null;
+        WaveFileWriter? writer;
+        lock (_bufferLock)
+        {
+            writer = _recordingWriter;
+            _recordingWriter = null;
+        }
         IsRecording = false;
+        try
+        {
+            writer?.Flush();
+            writer?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            // Same rationale as StopMonitoring's catch above: WAV/file teardown
+            // shouldn't be able to take the process down from here either.
+            CrashLogger.Log("LiveAudioService.StopRecording", ex);
+        }
         StopCaptureIfIdle();
         return duration;
     }
@@ -157,8 +182,11 @@ public sealed class LiveAudioService : IDisposable
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
-        if (!MonitorMuted) _monitorBuffer?.AddSamples(e.Buffer, 0, e.BytesRecorded);
-        _recordingWriter?.Write(e.Buffer, 0, e.BytesRecorded);
+        lock (_bufferLock)
+        {
+            if (!MonitorMuted) _monitorBuffer?.AddSamples(e.Buffer, 0, e.BytesRecorded);
+            _recordingWriter?.Write(e.Buffer, 0, e.BytesRecorded);
+        }
     }
 
     public void Dispose()

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.IO.Ports;
 using System.Threading;
 using System.Windows;
@@ -30,6 +31,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private DispatcherTimer? _pollTimer;
     private int _tickCount;
     private int _funcPage1RotationIndex;
+    private bool _pollInProgress;
 
     // Set while a local RECORD capture is in progress, so ToggleRecordAsync
     // can save frequency/mode as of the moment recording *started* (not
@@ -292,7 +294,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
     private long _frequencyHz;
     public long FrequencyHz { get => _frequencyHz; private set { if (SetProperty(ref _frequencyHz, value)) OnPropertyChanged(nameof(FrequencyDisplay)); } }
 
-    public string FrequencyDisplay => (_frequencyHz / 1_000_000.0).ToString("F6") + " MHz";
+    public string FrequencyDisplay => (_frequencyHz / 1_000_000.0).ToString("F6", CultureInfo.InvariantCulture) + " MHz";
 
     private string _directEntryText = "";
     public string DirectEntryText { get => _directEntryText; set => SetProperty(ref _directEntryText, value); }
@@ -534,7 +536,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private long _subFrequencyHz;
     public long SubFrequencyHz { get => _subFrequencyHz; private set { if (SetProperty(ref _subFrequencyHz, value)) OnPropertyChanged(nameof(SubFrequencyDisplay)); } }
-    public string SubFrequencyDisplay => (_subFrequencyHz / 1_000_000.0).ToString("F6") + " MHz";
+    public string SubFrequencyDisplay => (_subFrequencyHz / 1_000_000.0).ToString("F6", CultureInfo.InvariantCulture) + " MHz";
 
     private string _subFrequencyEntryText = "";
     public string SubFrequencyEntryText { get => _subFrequencyEntryText; set => SetProperty(ref _subFrequencyEntryText, value); }
@@ -1013,7 +1015,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task SetSubFrequencyAsync()
     {
-        if (!double.TryParse(SubFrequencyEntryText, out var mhz)) return;
+        if (!double.TryParse(SubFrequencyEntryText, NumberStyles.Float, CultureInfo.InvariantCulture, out var mhz)) return;
         var hz = (int)Math.Round(mhz * 1_000_000);
         await _radio.SetSubFrequencyAsync(hz);
         SubFrequencyHz = _radio.SubFrequencyHz;
@@ -1251,7 +1253,7 @@ public sealed class MainViewModel : ObservableObject, IDisposable
 
     private async Task SetFrequencyAsync()
     {
-        if (!double.TryParse(DirectEntryText, out var mhz)) return;
+        if (!double.TryParse(DirectEntryText, NumberStyles.Float, CultureInfo.InvariantCulture, out var mhz)) return;
         var hz = (int)Math.Round(mhz * 1_000_000);
         await _radio.SetFrequencyAsync(hz);
         FrequencyHz = _radio.FrequencyHz;
@@ -1515,29 +1517,46 @@ public sealed class MainViewModel : ObservableObject, IDisposable
         _pollTimer = null;
     }
 
+    // Tick handlers are async void (DispatcherTimer.Tick has no async-aware
+    // overload), so ticks don't serialize on their own — a heavy poll body
+    // (a dozen-plus sequential CAT round-trips on the every-8th-tick path)
+    // can routinely outlast the 250ms interval, letting the next tick start
+    // before this one finishes. CatConnection's FIFO queue keeps that from
+    // corrupting the wire, but nothing stopped the queue from backing up
+    // unboundedly. Skipping overlapping ticks here is safe to do on the UI
+    // thread alone (no locking needed) since DispatcherTimer.Tick always
+    // fires on the dispatcher thread.
     private async Task OnPollTickAsync()
     {
-        if (ConnectionState != ConnectionState.Connected) return;
-        await RefreshMetersAsync();
-        _tickCount++;
-        if (_tickCount >= 8)
+        if (_pollInProgress || ConnectionState != ConnectionState.Connected) return;
+        _pollInProgress = true;
+        try
         {
-            _tickCount = 0;
-            await RefreshFrequencyAsync();
-            await RefreshModeAsync();
-            await RefreshPttAsync();
-            await RefreshClarifierAsync();
-            await RefreshFineTuningAsync();
-            await RefreshSubDialValuesAsync();
-
-            _funcPage1RotationIndex = (_funcPage1RotationIndex + 1) % 4;
-            switch (_funcPage1RotationIndex)
+            await RefreshMetersAsync();
+            _tickCount++;
+            if (_tickCount >= 8)
             {
-                case 0: await RefreshFuncPage1DisplayGroupAsync(); break;
-                case 1: await RefreshFuncPage1TXCoreGroupAsync(); break;
-                case 2: await RefreshFuncPage2Async(); break;
-                default: await RefreshScanSplitAsync(); break;
+                _tickCount = 0;
+                await RefreshFrequencyAsync();
+                await RefreshModeAsync();
+                await RefreshPttAsync();
+                await RefreshClarifierAsync();
+                await RefreshFineTuningAsync();
+                await RefreshSubDialValuesAsync();
+
+                _funcPage1RotationIndex = (_funcPage1RotationIndex + 1) % 4;
+                switch (_funcPage1RotationIndex)
+                {
+                    case 0: await RefreshFuncPage1DisplayGroupAsync(); break;
+                    case 1: await RefreshFuncPage1TXCoreGroupAsync(); break;
+                    case 2: await RefreshFuncPage2Async(); break;
+                    default: await RefreshScanSplitAsync(); break;
+                }
             }
+        }
+        finally
+        {
+            _pollInProgress = false;
         }
     }
 
