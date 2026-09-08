@@ -394,17 +394,18 @@ GitHub Release (moving its contents into the release notes instead).
   same lock. Added a matching catch+log around `StopRecording`'s
   `Flush()`/`Dispose()`, mirroring the one already on `StopMonitoring`, for
   the same reason (a wedged USB Audio Class teardown shouldn't be able to
-  take the process down from either stop path). Not yet hardware-retested —
-  next hardware round should specifically try to reproduce the original
-  crash pattern (rapid Monitor ON/OFF, and Monitor + RECORD-to-file running
-  together) to confirm the race is what was actually happening.
+  take the process down from either stop path). **Hardware-confirmed
+  (2026-09-08):** repeated Monitor ON/OFF cycling produced no crash — the
+  race fix is holding up where the earlier defensive hardening alone
+  wasn't the actual fix.
 - **Added a poll-timer re-entrancy guard** (2026-09-08), per code review
   §1.1. `DispatcherTimer.Tick`'s `async void` handler wasn't serialized —
   the every-8th-tick heavy path (a dozen-plus sequential CAT round-trips)
   could routinely outlast the 250ms interval, letting overlapping
   `OnPollTickAsync` runs pile onto `CatConnection`'s FIFO queue unbounded.
   Added a `_pollInProgress` flag (UI-thread-only, no locking needed) that
-  skips a tick if the previous one hasn't finished.
+  skips a tick if the previous one hasn't finished. **Hardware-confirmed
+  (2026-09-08):** no lag or meter stutter noticed during general use.
 - **Frequency entry/display made culture-invariant** (2026-09-08), per code
   review §1.3. `SetFrequencyAsync`/`SetSubFrequencyAsync` parsed
   `DirectEntryText`/`SubFrequencyEntryText` with `double.TryParse` under the
@@ -412,13 +413,15 @@ GitHub Release (moving its contents into the release notes instead).
   fails to parse or parses as `14250`. Both now parse with
   `NumberStyles.Float`/`CultureInfo.InvariantCulture`; `FrequencyDisplay`/
   `SubFrequencyDisplay`'s `ToString("F6")` got the same treatment so entry
-  and display can't disagree.
+  and display can't disagree. **Hardware-confirmed (2026-09-08):** direct
+  frequency entry with a decimal point works correctly.
 
 ## Known/deferred items from the 2026-09-08 external code review
 
 A downloader sent a full static code review (no hardware access) on
-2026-09-08. §1.1, §1.2, and §1.3 were fixed — see the changelog above (or
-release notes, once cut into v3). The rest, by design, are left open:
+2026-09-08. §1.1, §1.2, and §1.3 were fixed and are now all
+hardware-confirmed (2026-09-08, see the changelog above / release notes
+once cut into v3). The rest, by design, are left open:
 
 - **§1.5 (ANT TUNE root cause) — theory doesn't apply, already resolved.**
   The review's suspect code (`SetAntennaTunerAsync('2')`) is the *pre-fix*
@@ -426,7 +429,9 @@ release notes, once cut into v3). The rest, by design, are left open:
   in commit `d66151a`, hardware-confirmed working 2026-09-06 (see
   "Resolved: ANT TUNE now hardware-confirmed working" above). The review
   appears to have been run against a stale snapshot predating that fix, not
-  current `main`. No action taken.
+  current `main`. No action taken. **Re-confirmed on hardware (2026-09-08):**
+  ANT TUNE triggers an audible relay click, consistent with the pre-existing
+  fix rather than the review's P1/P2-discovery theory.
 - **§1.4 (stale reply mis-attribution after a CAT timeout)** — plausible
   and self-limiting per the review's own analysis (every parser validates
   frame prefix/length/terminator, so a mismatched frame is normally just
