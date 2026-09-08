@@ -274,7 +274,7 @@ on hardware (2026-09-06) that ANT TUNE now does something on the radio.
    they come up, but there's no longer an open checklist of untested
    features.
 5. ~~Publish a public release~~ — done, see "Repo / distribution" below.
-   v1.0 is live as a self-contained single-file build with a working
+   v1 is live as a self-contained single-file build with a working
    GitHub Release download; code signing/SmartScreen and the MIT license
    are the remaining open items.
 
@@ -300,7 +300,14 @@ confirming radio behavior.
 GitHub: https://github.com/iTracMan/FTX1WinController.git — **repo is now
 public**.
 
-**v1.0 released** (2026-09-07): built as self-contained/single-file
+**Versioning: simple whole numbers only — v1, v2, v3, etc.** No semantic
+versioning, no patch numbers (never "v1.0.1" or "v1.1"). Each GitHub Release
+is the next whole number up from the last. This is a separate counter from
+the in-window title's `AppVersion` build number (`MainWindow.xaml.cs`) — that
+one bumps per test build handed to the user, independent of when a GitHub
+Release actually gets cut.
+
+**v1 released** (2026-09-07): built as self-contained/single-file
 (`RuntimeIdentifier=win-x64`, `SelfContained=true`, `PublishSingleFile=true`
 in `src/FTX1WinController/FTX1WinController.csproj`) via
 `dotnet publish src/FTX1WinController/FTX1WinController.csproj -c Release`,
@@ -324,3 +331,12 @@ https://github.com/iTracMan/FTX1WinController/releases/latest
 Code signing/SmartScreen still unresolved — the unsigned exe will likely
 trigger a SmartScreen warning on first run for end users; MIT license
 still to be added to the repo.
+
+### Changes merged to main since v1 (accumulating toward v2)
+
+Keep this list updated as commits land — add an entry per merged
+fix/feature, and clear the list back to empty right after cutting the v2
+GitHub Release (moving its contents into the release notes instead).
+
+- **AM/AM-N added to the SQL-not-RF mode group** (2026-09-08, commit
+  `95ced2d`) — see "Current status" above for detail. Hardware-confirmed.
