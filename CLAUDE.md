@@ -349,11 +349,16 @@ No .NET Desktop Runtime install step needed for end users as a result.
 **GitHub Release live, download confirmed working**:
 https://github.com/iTracMan/FTX1WinController/releases/latest
 
-Code signing/SmartScreen still unresolved — the unsigned exe will likely
-trigger a SmartScreen warning on first run for end users. MIT `LICENSE`
-added to the repo root 2026-09-08 (copyright holder: `iTracMan`, matching
-the git/GitHub identity already used throughout the repo rather than
-adding a real name/email).
+**Code signing: deliberately skipped, not an open item.** A signing
+certificate is an ongoing paid cost, and this is a free hobby project — the
+user decided (2026-09-08) not to pursue it. The unsigned exe will trigger a
+Windows SmartScreen warning on first run; instead of paying to avoid it, the
+warning is explained to end users (README's "About the SmartScreen warning"
+section, and the same note in each GitHub Release description): it's
+expected for any unsigned app, not a problem with this one, and is bypassed
+via "More info" → "Run anyway". MIT `LICENSE` added to the repo root
+2026-09-08 (copyright holder: `iTracMan`, matching the git/GitHub identity
+already used throughout the repo rather than adding a real name/email).
 
 **v2 released** (2026-09-08): same self-contained/single-file build process
 as v1 (`dotnet publish src/FTX1WinController/FTX1WinController.csproj -c
