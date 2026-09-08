@@ -340,3 +340,15 @@ GitHub Release (moving its contents into the release notes instead).
 
 - **AM/AM-N added to the SQL-not-RF mode group** (2026-09-08, commit
   `95ced2d`) — see "Current status" above for detail. Hardware-confirmed.
+- **Debug builds no longer self-contained/win-x64** (2026-09-08):
+  `RuntimeIdentifier`/`SelfContained`/`PublishSingleFile` in
+  `FTX1WinController.csproj` were in the top-level `<PropertyGroup>`, so
+  they applied to every build, not just Release publish — Debug builds
+  started landing in `bin\Debug\net8.0-windows\win-x64\` (RID-suffixed
+  path) instead of the old `bin\Debug\net8.0-windows\`, and became
+  self-contained (bundling the full .NET runtime) along the way. Moved
+  those three properties into a `Condition="'$(Configuration)'=='Release'"`
+  `<PropertyGroup>` so Debug goes back to the old plain, framework-dependent
+  path/behavior, while `dotnet publish -c Release` still produces the same
+  win-x64 self-contained single-file output v1 shipped with (verified:
+  `bin\Release\net8.0-windows\win-x64\publish\` unchanged).
